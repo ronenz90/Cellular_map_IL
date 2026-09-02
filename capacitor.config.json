@@ -1,0 +1,12 @@
+{
+  "appId": "il.antennamap.app",
+  "appName": "אנטנות ישראל",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
