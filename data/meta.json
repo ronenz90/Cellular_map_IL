@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-09-02T17:52:16.108994+00:00",
+  "updated_at": "2026-09-02T18:17:03.905650+00:00",
   "source": "https://data.gov.il/dataset/antennaactive",
   "counts": {
-    "active": 0,
-    "planned": 0
+    "active": 8475,
+    "planned": 326
   }
 }
