@@ -96,26 +96,61 @@ const DataLoader = (() => {
   }
 
   // --- חיפוש כתובות בישראל דרך Nominatim (OSM) ---
-  // גבולות גס של ישראל לצורך הטיית תוצאות החיפוש
+  // גבולות גס של ישראל (כולל יהודה ושומרון) לצורך הטיית תוצאות החיפוש
   const ISRAEL_VIEWBOX = '34.0,29.3,35.9,33.4'; // minLon,minLat,maxLon,maxLat
 
-  async function searchAddress(query) {
-    if (!query || query.trim().length < 2) return [];
-    const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&countrycodes=il&viewbox=${ISRAEL_VIEWBOX}&bounded=1&accept-language=he&q=${encodeURIComponent(query)}`;
+  function buildCleanLabel(r) {
+    const addr = r.address || {};
+    const parts = [];
+    const road = addr.road || addr.pedestrian || addr.footway;
+    const houseNum = addr.house_number;
+    if (road) parts.push(houseNum ? `${road} ${houseNum}` : road);
+    const place = addr.city || addr.town || addr.village || addr.municipality || addr.county;
+    if (place && place !== parts[0]) parts.push(place);
+    if (!parts.length) return r.display_name;
+    return parts.join(', ');
+  }
+
+  async function runNominatim(query, { restrictToIL }) {
+    let url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&viewbox=${ISRAEL_VIEWBOX}&bounded=1&accept-language=he&q=${encodeURIComponent(query)}`;
+    if (restrictToIL) url += '&countrycodes=il';
     try {
       const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
       if (!res.ok) return [];
-      const results = await res.json();
-      return results.map(r => ({
-        label: r.display_name,
-        lat: parseFloat(r.lat),
-        lon: parseFloat(r.lon),
-        boundingbox: r.boundingbox,
-      }));
+      return await res.json();
     } catch (e) {
       console.warn('שגיאת חיפוש כתובת', e);
       return [];
     }
+  }
+
+  async function searchAddress(query) {
+    if (!query || query.trim().length < 2) return [];
+
+    // ניסיון ראשון: מוגבל לישראל (countrycodes=il). ישובים מעבר לקו הירוק
+    // (למשל גבעת זאב, מעלה אדומים) לפעמים לא מתויגים כ-"il" ב-OSM,
+    // ולכן אם אין תוצאות טובות מנסים שוב בלי ההגבלה הזו (עדיין בתוך
+    // גבולות ה-viewbox של האזור כולו).
+    let results = await runNominatim(query, { restrictToIL: true });
+    if (results.length === 0) {
+      results = await runNominatim(query, { restrictToIL: false });
+    }
+
+    // הסרת כפילויות (אותו place_id) ובניית תווית קריאה במקום display_name הארוך
+    const seen = new Set();
+    const cleaned = [];
+    for (const r of results) {
+      if (seen.has(r.place_id)) continue;
+      seen.add(r.place_id);
+      cleaned.push({
+        label: buildCleanLabel(r),
+        fullLabel: r.display_name,
+        lat: parseFloat(r.lat),
+        lon: parseFloat(r.lon),
+        boundingbox: r.boundingbox,
+      });
+    }
+    return cleaned;
   }
 
   return { loadAntennas, loadMeta, searchAddress, normalizeProps };
