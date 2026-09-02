@@ -324,7 +324,7 @@ async function runAdvancedCoverage(a, marker) {
 
   try {
     const baseRadius = coverageRadiusFor(a);
-    const { polygon, usedClutter, source, computedAt } = await TerrainCoverage.computeCoverage(a, baseRadius);
+    const { polygon, usedClutter, source, computedAt, clutterSource } = await TerrainCoverage.computeCoverage(a, baseRadius);
 
     if (advancedCoverageLayer) map.removeLayer(advancedCoverageLayer);
     advancedCoverageLayer = L.polygon(polygon, {
@@ -332,7 +332,9 @@ async function runAdvancedCoverage(a, marker) {
       fillColor: '#f97316', fillOpacity: 0.15,
     }).addTo(map);
 
-    const clutterNote = usedClutter ? ' + תכסית (יער/עירוני/מים)' : ' (תכסית לא זמינה כרגע - רק תבליט)';
+    const clutterNote = usedClutter
+      ? ` + תכסית (יער/עירוני/מים${clutterSource === 'live' ? ', ישיר מ-OSM' : ''})`
+      : ' (תכסית לא זמינה כרגע - רק תבליט)';
     const sourceNote = source === 'precomputed'
       ? ` <span style="color:#34d399">(מוכן מראש${computedAt ? ', מ-' + new Date(computedAt).toLocaleDateString('he-IL') : ''})</span>`
       : ' <span style="color:#9ca3af">(חושב עכשיו בזמן אמת)</span>';

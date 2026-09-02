@@ -1,6 +1,6 @@
 /**
  * terrain-coverage.js - "כיסוי מדויק יותר" מבוסס תבליט (SRTM 30m), קו-ראייה,
- * ותכסית (landuse/landcover אמיתי מ-OpenStreetMap דרך Overpass API)
+ * ותכסית (landuse/landcover אמיתי מ-OpenStreetMap)
  *
  * חשוב להבין את המגבלות: המאגר הממשלתי החינמי לא כולל גובה תורן אמיתי,
  * אזימוט/כיוון אנטנה או דגם. הוא כן כולל (חלקית) הספק שידור תיאורטי
@@ -8,16 +8,17 @@
  * (ראו app.js: powerAdjustedRadius). המודל הזה מוסיף שתי שכבות נתונים
  * אמיתיות נוספות על גבי זה:
  *   1. תבליט (טופוגרפיה) - קו-ראייה אמיתי מול תבליט השטח (SRTM)
- *   2. תכסית (יער/מים/בינוי) - פוליגוני landuse/natural אמיתיים מ-OSM
- *      דרך Overpass API, שגם הם מקצרים/מאריכים את הכיסוי בהתאם
+ *   2. תכסית (יער/מים/בינוי) - פוליגוני landuse/natural אמיתיים מ-OSM,
+ *      שגם הם מקצרים/מאריכים את הכיסוי בהתאם
  * זו עדיין הערכה הנדסית, לא מדידת שדה אלקטרומגנטי אמיתית (חסר: גובה
  * תורן מדויק, אזימוט, דגם אנטנה, החזרות רב-נתיביות).
  *
- * מקורות נתונים חיצוניים (שני API-ים חינמיים, ללא מפתח):
- *   - opentopodata.org (dataset=srtm30m) - גובה תבליט
- *   - overpass-api.de - תכסית (landuse/natural) מ-OpenStreetMap
- * שני אלה נקראים **על פי דרישה בלבד** (לחיצה על כפתור לאנטנה ספציפית),
- * לעולם לא רצים אוטומטית על כל האנטנות בבת אחת.
+ * תכסית: מועדף לגמרי הקובץ המקומי data/landcover-israel.json (נבנה
+ * מראש ע"י scripts/fetch_landcover.py מ-extract שלם של OSM, בלי שום
+ * rate limit) - בדיקה מקומית ומיידית. רק אם הקובץ הזה עדיין לא קיים
+ * בריפו (למשל לפני ההרצה הראשונה של update-landcover.yml), נופלים
+ * זמנית לקריאה חיה ל-Overpass API (שהתגלתה בפועל לא אמינה בעומס).
+ * תבליט עדיין נשלף חי מ-opentopodata.org בכל לחיצה (על פי דרישה בלבד).
  */
 const TerrainCoverage = (() => {
 
@@ -27,6 +28,7 @@ const TerrainCoverage = (() => {
   const RECEIVER_HEIGHT = 1.5;  // גובה מקלט טיפוסי (מטרים)
   const ANTENNA_HEIGHT = 30;    // הנחת גובה תורן טיפוסי בישראל (מטרים) - לא ידוע בפועל
   const K_FACTOR = 4 / 3;       // מקדם עקמומיות כדור הארץ הרדיו-סטנדרטי
+  const LANDCOVER_CELL_DEG = 0.05; // ~5 ק"מ, זהה ל-precompute_coverage.py
 
   // מקדמי הנחתה נוספת לפי סוג תכסית (heuristic - לא מדידת דעיכה בפועל)
   const CLUTTER_FACTOR = {
@@ -37,6 +39,7 @@ const TerrainCoverage = (() => {
   };
 
   const cache = new Map(); // antennaId -> polygon latlngs (session cache)
+  let landcoverIndexPromise = null; // נטען פעם אחת בלבד, משותף לכל הקריאות
 
   function toRad(d) { return d * Math.PI / 180; }
   function toDeg(r) { return r * 180 / Math.PI; }
@@ -114,16 +117,70 @@ const TerrainCoverage = (() => {
     return elevations;
   }
 
-  /* ===================== תכסית (landuse) דרך Overpass ===================== */
-  // מספר שרתים ציבוריים - overpass-api.de התגלה עמוס מאוד בפועל
-  // (504/429 תכופים), אז מנסים גם חלופות לפני שמוותרים.
+  /* ===================== תכסית מקומית (מועדף) ===================== */
+
+  function buildLandcoverIndex(bundle) {
+    const grid = new Map();
+    for (const poly of bundle) {
+      let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+      for (const [lat, lon] of poly.points) {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+      }
+      const minCy = Math.floor(minLat / LANDCOVER_CELL_DEG), maxCy = Math.floor(maxLat / LANDCOVER_CELL_DEG);
+      const minCx = Math.floor(minLon / LANDCOVER_CELL_DEG), maxCx = Math.floor(maxLon / LANDCOVER_CELL_DEG);
+      for (let cy = minCy; cy <= maxCy; cy++) {
+        for (let cx = minCx; cx <= maxCx; cx++) {
+          const key = `${cy},${cx}`;
+          if (!grid.has(key)) grid.set(key, []);
+          grid.get(key).push(poly);
+        }
+      }
+    }
+    return grid;
+  }
+
+  async function loadLandcoverIndex() {
+    if (!landcoverIndexPromise) {
+      landcoverIndexPromise = fetch('data/landcover-israel.json', { cache: 'force-cache' })
+        .then(res => res.ok ? res.json() : null)
+        .then(bundle => bundle ? buildLandcoverIndex(bundle) : null)
+        .catch(() => null);
+    }
+    return landcoverIndexPromise;
+  }
+
+  function clutterPolygonsFromIndex(lat, lon, index) {
+    const cy = Math.floor(lat / LANDCOVER_CELL_DEG), cx = Math.floor(lon / LANDCOVER_CELL_DEG);
+    const seen = new Set();
+    const result = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const cell = index.get(`${cy + dy},${cx + dx}`);
+        if (!cell) continue;
+        for (const poly of cell) {
+          if (seen.has(poly)) continue;
+          seen.add(poly);
+          result.push(poly);
+        }
+      }
+    }
+    return result;
+  }
+
+  /* ===================== תכסית - fallback חי דרך Overpass ===================== */
+  // משמש רק אם data/landcover-israel.json עדיין לא קיים בריפו. מספר
+  // שרתים ציבוריים - overpass-api.de התגלה עמוס מאוד בפועל (504/429
+  // תכופים), אז מנסים גם חלופות לפני שמוותרים.
   const OVERPASS_ENDPOINTS = [
     'https://overpass-api.de/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
     'https://overpass.openstreetmap.ru/api/interpreter',
   ];
 
-  async function fetchClutterPolygons(lat, lon, radiusM) {
+  async function fetchClutterPolygonsLive(lat, lon, radiusM) {
     const query = `[out:json][timeout:20];(
       way["natural"="wood"](around:${radiusM},${lat},${lon});
       way["landuse"="forest"](around:${radiusM},${lat},${lon});
@@ -158,6 +215,14 @@ const TerrainCoverage = (() => {
       }
     }
     return []; // כל השרתים נכשלו - כישלון שקט, נמשיך בלי תכסית (עדיין יש תבליט)
+  }
+
+  async function fetchClutterPolygons(lat, lon, radiusM) {
+    const index = await loadLandcoverIndex();
+    if (index) {
+      return { polygons: clutterPolygonsFromIndex(lat, lon, index), source: 'local' };
+    }
+    return { polygons: await fetchClutterPolygonsLive(lat, lon, radiusM), source: 'live' };
   }
 
   // Ray-casting point-in-polygon סטנדרטי
@@ -219,10 +284,11 @@ const TerrainCoverage = (() => {
     const allSamplePoints = [[antenna.lat, antenna.lon], ...rayPoints.map(p => [p[0], p[1]])];
 
     // תבליט ותכסית נשלפים במקביל (שני מקורות שונים, לא תלויים זה בזה)
-    const [elevations, clutterPolygons] = await Promise.all([
+    const [elevations, clutterResult] = await Promise.all([
       fetchElevations(allSamplePoints),
       fetchClutterPolygons(antenna.lat, antenna.lon, Math.round(maxDist)),
     ]);
+    const clutterPolygons = clutterResult.polygons;
 
     const antennaGroundElev = elevations[0] || 0;
     const antennaTotalHeight = antennaGroundElev + ANTENNA_HEIGHT;
@@ -264,7 +330,7 @@ const TerrainCoverage = (() => {
       polygon.push([lat, lon]);
     }
 
-    const result = { polygon, usedClutter: clutterPolygons.length > 0, source: 'live' };
+    const result = { polygon, usedClutter: clutterPolygons.length > 0, source: 'live', clutterSource: clutterResult.source };
     cache.set(cacheKey, result);
     return result;
   }
