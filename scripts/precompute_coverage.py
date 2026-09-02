@@ -43,8 +43,17 @@ ANTENNA_HEIGHT = 30
 RECEIVER_HEIGHT = 1.5
 K_FACTOR = 4 / 3
 
-CLUTTER_QUERY_DELAY = 1.5   # שניות בין קריאות ל-Overpass (fair use)
+CLUTTER_QUERY_DELAY = 2.5   # שניות בין קריאות ל-Overpass (fair use) - הוגדל בעקבות 429/504 בפועל
 ELEVATION_BATCH_DELAY = 1.1  # שניות בין batches ל-opentopodata
+
+# כמה שרתי Overpass ציבוריים חלופיים - אם אחד עמוס/חוסם, מנסים את הבא.
+# overpass-api.de (הראשי) התגלה כעמוס מאוד בפועל (504/429 חוזרים).
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
 
 MAX_RUNTIME_SECONDS = int(os.environ.get("MAX_RUNTIME_SECONDS", 5 * 3600))
 SAFETY_MARGIN_SECONDS = 180  # משאירים 3 דקות מרווח ביטחון לפני סוף התקציב
@@ -104,7 +113,7 @@ def fetch_elevations_batch(points):
 
 
 def fetch_clutter_polygons(lat, lon, radius_m):
-    query = f"""[out:json][timeout:20];(
+    query = f"""[out:json][timeout:25];(
       way["natural"="wood"](around:{radius_m},{lat},{lon});
       way["landuse"="forest"](around:{radius_m},{lat},{lon});
       way["natural"="water"](around:{radius_m},{lat},{lon});
@@ -113,15 +122,9 @@ def fetch_clutter_polygons(lat, lon, radius_m):
       way["landuse"="commercial"](around:{radius_m},{lat},{lon});
       way["landuse"="industrial"](around:{radius_m},{lat},{lon});
     );out geom;"""
-    polys = []
-    try:
-        req = Request(
-            "https://overpass-api.de/api/interpreter",
-            data=("data=" + query).encode("utf-8"),
-            headers={"User-Agent": "antenna-map-precompute/1.0"},
-        )
-        with urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+
+    def parse(data):
+        polys = []
         for el in data.get("elements", []):
             geom = el.get("geometry")
             if not geom or len(geom) < 3:
@@ -136,11 +139,32 @@ def fetch_clutter_polygons(lat, lon, radius_m):
             else:
                 cat = "open"
             polys.append({"category": cat, "points": [[g["lat"], g["lon"]] for g in geom]})
-    except Exception as e:
-        print(f"    שגיאת Overpass: {e}", file=sys.stderr)
-    finally:
-        time.sleep(CLUTTER_QUERY_DELAY)
-    return polys
+        return polys
+
+    # מנסים כל שרת, עם עד 2 ניסיונות לכל שרת (backoff ארוך יותר על 429)
+    for endpoint in OVERPASS_ENDPOINTS:
+        for attempt in range(2):
+            try:
+                req = Request(
+                    endpoint,
+                    data=("data=" + query).encode("utf-8"),
+                    headers={"User-Agent": "antenna-map-precompute/1.0"},
+                )
+                with urlopen(req, timeout=35) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                time.sleep(CLUTTER_QUERY_DELAY)
+                return parse(data)
+            except HTTPError as e:
+                wait = 10 if e.code == 429 else 5
+                print(f"    Overpass ({endpoint.split('/')[2]}) HTTP {e.code}, ממתין {wait}s", file=sys.stderr)
+                time.sleep(wait)
+            except Exception as e:
+                print(f"    Overpass ({endpoint.split('/')[2]}) שגיאה: {e}", file=sys.stderr)
+                time.sleep(3)
+
+    print("    כל שרתי Overpass נכשלו הפעם - ממשיכים בלי תכסית לאנטנה הזו (רק תבליט)", file=sys.stderr)
+    time.sleep(CLUTTER_QUERY_DELAY)
+    return []
 
 
 def point_in_polygon(lat, lon, polygon):
