@@ -1,0 +1,37 @@
+name: עדכון נתוני אנטנות
+
+on:
+  schedule:
+    # פעם ביום ב-03:00 UTC (כ-06:00 שעון ישראל). המקור הממשלתי מתעדכן
+    # לרוב לא יותר מפעם בשבוע-חודש, כך שתדירות יומית מספיקה בהחלט
+    # ואינה מעמיסה על data.gov.il.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}   # מאפשר הרצה ידנית מטאב Actions בגיטהאב
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: הרצת סקריפט השליפה
+        run: python3 scripts/fetch_data.py
+
+      - name: קומיט ופוש אם יש שינויים
+        run: |
+          git config user.name "antenna-data-bot"
+          git config user.email "actions@github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "אין שינויים בנתונים"
+          else
+            git commit -m "עדכון אוטומטי לנתוני אנטנות $(date -u +'%Y-%m-%d')"
+            git push
+          fi
