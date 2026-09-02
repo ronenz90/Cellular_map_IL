@@ -98,7 +98,7 @@ let map, clusterGroup, plainLayerGroup, coverageLayer, plannedLayer, reportsLaye
 let allAntennas = [];
 let reportMode = false;
 let state = {
-  generations: new Set(['2G', '3G', '4G', '5G']),
+  generations: new Set(['2G', '3G', '4G', '5G', 'לא ידוע']),
   operators: new Set(),
   showCoverage: true,
   useCluster: true,
@@ -111,23 +111,32 @@ function initMap() {
     .setView(ISRAEL_CENTER, 8);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-  const streets = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 20,
+  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors', maxZoom: 19,
   });
   const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     attribution: 'Tiles &copy; Esri', maxZoom: 19,
   });
-  const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19,
-  });
 
   streets.addTo(map);
-  window._basemaps = { streets, satellite, dark };
+  // "מפה כהה" אינה שכבת אריחים נפרדת (ספקים חיצוניים לזה דרשו לאחרונה
+  // מפתח API ונשברו) - במקום זאת מפעילים פילטר CSS שהופך את אריחי
+  // מפת הרחובות הרגילה לכהה. אמין לגמרי כי אין תלות בספק שלישי נוסף.
+  window._basemaps = { streets, satellite };
 
   document.querySelectorAll('input[name="basemap"]').forEach(radio => {
     radio.addEventListener('change', (e) => {
-      Object.values(window._basemaps).forEach(l => map.removeLayer(l));
-      window._basemaps[e.target.value].addTo(map);
+      const val = e.target.value;
+      const mapEl = document.getElementById('map');
+      if (val === 'dark') {
+        Object.values(window._basemaps).forEach(l => map.removeLayer(l));
+        streets.addTo(map);
+        mapEl.classList.add('dark-tiles');
+      } else {
+        mapEl.classList.remove('dark-tiles');
+        Object.values(window._basemaps).forEach(l => map.removeLayer(l));
+        window._basemaps[val].addTo(map);
+      }
     });
   });
 
@@ -398,6 +407,22 @@ function renderAntennas() {
 
   document.getElementById('statsBox').innerHTML =
     `<b>${visibleCount.toLocaleString('he-IL')}</b> אנטנות מוצגות<br>מתוך <b>${allAntennas.length.toLocaleString('he-IL')}</b> סה"כ`;
+
+  const unknownCount = allAntennas.filter(a => a.props.generation === 'לא ידוע').length;
+  if (unknownCount > 0) {
+    const samples = [...new Set(
+      allAntennas
+        .filter(a => a.props.generation === 'לא ידוע')
+        .map(a => a.props.raw && a.props.raw['טכנולוגיית שידור'])
+        .filter(Boolean)
+    )].slice(0, 8);
+    document.getElementById('statsBox').innerHTML += `
+      <div style="margin-top:6px;color:#fbbf24;font-size:11.5px">
+        ⚠️ ${unknownCount.toLocaleString('he-IL')} אנטנות בדור רשת לא מזוהה (עדיין מוצגות).
+        ${samples.length ? 'ערכים גולמיים שנמצאו: ' + samples.map(s => `"${s}"`).join(', ') : ''}
+      </div>`;
+    console.info('[antenna-map] ערכי "טכנולוגיית שידור" לא מזוהים:', samples);
+  }
 }
 
 function buildOperatorFilters() {
