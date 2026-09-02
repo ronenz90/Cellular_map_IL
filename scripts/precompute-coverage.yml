@@ -1,0 +1,52 @@
+name: חישוב מקדים לכיסוי (תבליט+תכסית)
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_hours:
+        description: 'תקציב זמן ריצה בשעות (ברירת מחדל 5)'
+        required: false
+        default: '5'
+  schedule:
+    # כל לילה ב-01:00 UTC (כ-04:00 שעון ישראל) - אחרי שעדכון האנטנות
+    # היומי (03:00 UTC) כבר... רגע, זה *לפני*. זה בכוונה: מריצים את
+    # precompute על הנתונים העדכניים ביותר שכבר קיימים בריפו (מהלילה
+    # הקודם), וב-03:00 UTC יעודכנו האנטנות לקראת הסבב הבא. איטי בכוונה -
+    # תבליט/תכסית כמעט ולא משתנים, אין דחיפות לרוץ מיד אחרי כל עדכון.
+    - cron: '0 1 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: precompute-coverage
+  cancel-in-progress: false  # לא לבטל ריצה באמצע - זה job איטי ויקר, עדיף לתת לו לסיים
+
+jobs:
+  precompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # מרווח ביטחון מתחת למגבלת 360 הדקות של GitHub Actions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: הרצת חישוב מקדים (איטי, מכבד rate limits)
+        env:
+          MAX_RUNTIME_SECONDS: ${{ github.event.inputs.max_hours && fromJSON(github.event.inputs.max_hours) * 3600 || 18000 }}
+        run: python3 scripts/precompute_coverage.py
+
+      - name: קומיט ופוש של תוצאות הלילה
+        run: |
+          git config user.name "antenna-coverage-bot"
+          git config user.email "actions@github.com"
+          git add data/coverage/ data/coverage-precompute-state.json
+          if git diff --cached --quiet; then
+            echo "אין קבצי כיסוי חדשים"
+          else
+            COUNT=$(git diff --cached --name-only | grep -c '^data/coverage/' || true)
+            git commit -m "חישוב מקדים לילי לכיסוי: כ-$COUNT קבצים עודכנו"
+            git push
+          fi
