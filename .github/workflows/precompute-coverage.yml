@@ -35,8 +35,10 @@ jobs:
 
       - name: הרצת חישוב מקדים (איטי, מכבד rate limits)
         env:
-          MAX_RUNTIME_SECONDS: ${{ github.event.inputs.max_hours && fromJSON(github.event.inputs.max_hours) * 3600 || 18000 }}
-        run: python3 scripts/precompute_coverage.py
+          MAX_HOURS: ${{ github.event.inputs.max_hours || '5' }}
+        run: |
+          export MAX_RUNTIME_SECONDS=$(python3 -c "print(int(float('$MAX_HOURS') * 3600))")
+          python3 scripts/precompute_coverage.py
 
       - name: קומיט ופוש של תוצאות הלילה
         run: |
