@@ -6,11 +6,11 @@ const ISRAEL_CENTER = [31.5, 34.9];
 const ISRAEL_BOUNDS = L.latLngBounds([29.3, 34.0], [33.4, 35.9]);
 
 // צבעים לפי דור רשת
-const GEN_COLORS = { '2G': '#94a3b8', '3G': '#fbbf24', '4G': '#34d399', '5G': '#a855f7', 'לא ידוע': '#64748b' };
+const GEN_COLORS = { '2G': '#94a3b8', '3G': '#fbbf24', '4G': '#34d399', '5G': '#a855f7', 'אחר': '#475569', 'לא ידוע': '#64748b' };
 
 // רדיוס כיסוי משוער בסיסי (מטרים) לפני התאמת צפיפות - הערכה גסה בלבד,
 // ללא נתוני הספק/גובה תורן אמיתיים
-const BASE_COVERAGE_RADIUS = { '2G': 1500, '3G': 900, '4G': 700, '5G': 350, 'לא ידוע': 500 };
+const BASE_COVERAGE_RADIUS = { '2G': 1500, '3G': 900, '4G': 700, '5G': 350, 'אחר': 300, 'לא ידוע': 500 };
 
 // --- אינדקס צפיפות מרחבי (grid) להתאמת רדיוס כיסוי לפי עירוני/כפרי ---
 // היגיון: הרבה אנטנות קרובות = סביר שאזור עירוני צפוף -> רדיוס קטן יותר.
@@ -98,7 +98,7 @@ let map, clusterGroup, plainLayerGroup, coverageLayer, plannedLayer, reportsLaye
 let allAntennas = [];
 let reportMode = false;
 let state = {
-  generations: new Set(['2G', '3G', '4G', '5G', 'לא ידוע']),
+  generations: new Set(['2G', '3G', '4G', '5G', 'אחר', 'לא ידוע']),
   operators: new Set(),
   showCoverage: true,
   useCluster: true,

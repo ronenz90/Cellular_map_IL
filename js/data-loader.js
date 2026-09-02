@@ -57,6 +57,7 @@ const DataLoader = (() => {
       else if (raw.includes('רביע')) matched = '4G';
       else if (raw.includes('שליש')) matched = '3G';
       else if (raw.includes('שני')) matched = '2G';
+      else if (/רפיטר|מיקרוגל|לא פעיל|לא פועל|repeater|microwave/i.test(raw)) matched = 'אחר';
       else {
         // פורמט "דור X" / "דור X Y Z" - חילוץ כל הספרות 2-5 שמופיעות
         // ובחירת הגבוהה ביותר כדור המייצג
