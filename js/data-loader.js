@@ -41,20 +41,33 @@ const DataLoader = (() => {
       }
     }
     // נרמול דור הרשת לערכים אחידים: 2G/3G/4G/5G
-    // הרחבנו את הזיהוי כדי לתפוס גם שמות טכניים (GSM/UMTS/LTE/NR) ולא
-    // רק את המחרוזת "2G" המילולית, כי לא ידוע מראש איך בדיוק המשרד
-    // להגנת הסביבה מנסח את "טכנולוגיית שידור" בפועל.
+    // הפורמט האמיתי שהתגלה בפועל (תודה לאבחון בממשק!): "דור 4",
+    // "דור 3 4", "דור 3 4 5" וכו' - אתר יכול לשדר כמה דורות בו-זמנית,
+    // מופרדים ברווח, בלי אות "G". בוחרים את הדור הגבוה ביותר שמופיע
+    // כ"נציג" האתר (הכי רלוונטי לסינון), ושומרים גם רשימה מלאה.
     if (out.generation) {
-      const g = String(out.generation).toUpperCase();
-      if (/5G|NR\b|N78|N41|N77/.test(g)) out.generation = '5G';
-      else if (/4G|LTE/.test(g)) out.generation = '4G';
-      else if (/3G|UMTS|WCDMA|HSPA/.test(g)) out.generation = '3G';
-      else if (/2G|GSM|EDGE|GPRS/.test(g)) out.generation = '2G';
-      else if (out.generation.includes('חמיש')) out.generation = '5G';
-      else if (out.generation.includes('רביע')) out.generation = '4G';
-      else if (out.generation.includes('שליש')) out.generation = '3G';
-      else if (out.generation.includes('שני')) out.generation = '2G';
-      else out.generation = 'לא ידוע';
+      const raw = String(out.generation);
+      const g = raw.toUpperCase();
+      let matched = null;
+      if (/5G|NR\b|N78|N41|N77/.test(g)) matched = '5G';
+      else if (/4G|LTE/.test(g)) matched = '4G';
+      else if (/3G|UMTS|WCDMA|HSPA/.test(g)) matched = '3G';
+      else if (/2G|GSM|EDGE|GPRS/.test(g)) matched = '2G';
+      else if (raw.includes('חמיש')) matched = '5G';
+      else if (raw.includes('רביע')) matched = '4G';
+      else if (raw.includes('שליש')) matched = '3G';
+      else if (raw.includes('שני')) matched = '2G';
+      else {
+        // פורמט "דור X" / "דור X Y Z" - חילוץ כל הספרות 2-5 שמופיעות
+        // ובחירת הגבוהה ביותר כדור המייצג
+        const digits = raw.match(/[2-5]/g);
+        if (digits && digits.length) {
+          const uniqueSorted = [...new Set(digits.map(Number))].sort((a, b) => a - b);
+          matched = `${uniqueSorted[uniqueSorted.length - 1]}G`;
+          out.allGenerations = uniqueSorted.map(d => `${d}G`);
+        }
+      }
+      out.generation = matched || 'לא ידוע';
     } else {
       out.generation = 'לא ידוע';
     }

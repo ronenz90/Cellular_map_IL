@@ -301,7 +301,7 @@ function buildPopup(a) {
     ? `<div class="popup-row"><b>% מסף בריאות (מדידה):</b> ${p.healthPercent}%</div>` : '';
   return `
     <div class="popup-title">${p.operator || 'מפעיל לא ידוע'}</div>
-    <div class="popup-row">${genDot(p.generation)} ${p.status ? '<span style="color:#9ca3af">(' + p.status + ')</span>' : ''}</div>
+    <div class="popup-row">${p.allGenerations && p.allGenerations.length > 1 ? p.allGenerations.map(genDot).join(' ') : genDot(p.generation)} ${p.status ? '<span style="color:#9ca3af">(' + p.status + ')</span>' : ''}</div>
     ${addr ? `<div class="popup-row"><b>כתובת:</b> ${addr}</div>` : ''}
     ${p.city ? `<div class="popup-row"><b>יישוב:</b> ${p.city}</div>` : ''}
     ${p.siteType ? `<div class="popup-row"><b>סוג אתר:</b> ${p.siteType}</div>` : ''}
