@@ -10,15 +10,24 @@
 const DataLoader = (() => {
 
   // מיפוי גמיש של שמות עמודות אפשריים -> שדה מנורמל.
-  // אם המשרד להגנת הסביבה משנה את שמות העמודות, מספיק לעדכן כאן.
+  // עודכן לפי שמות השדות האמיתיים שהתגלו בהרצה בפועל מול data.gov.il
+  // (ראו scripts/fetch_data.py - הלוג מדפיס את השדות בכל הרצה).
   const FIELD_MAP = {
-    operator: ['מפעיל', 'חברה', 'שם החברה', 'operator', 'company'],
-    generation: ['דור', 'דור_רשת', 'טכנולוגיה', 'generation', 'tech'],
-    city: ['רשות מקומית', 'ישוב', 'עיר', 'city', 'locality'],
-    street: ['רחוב', 'street'],
+    operator: ['חברה', 'מפעיל', 'שם החברה', 'operator', 'company'],
+    generation: ['טכנולוגיית שידור', 'דור', 'דור_רשת', 'טכנולוגיה', 'generation', 'tech'],
+    city: ['עיר', 'ישוב', 'רשות מקומית', 'city', 'locality'],
+    street: ['כתובת האתר', 'כתובת + תאור', 'רחוב', 'street'],
     houseNumber: ['מספר', 'מספר_בית', 'house_number'],
-    id: ['מזהה', 'מספר_מוקד', 'id', 'objectid'],
-    status: ['סטטוס', 'status'],
+    id: ['ID', "מס' אתר", 'מספר האתר', 'מזהה', 'מספר_מוקד', 'id', 'objectid'],
+    status: ["סוג  היתר", 'סוג היתר', 'סטטוס', 'status'],
+    siteType: ['סוג אתר', 'סוג המוקד'],
+    // נתוני הספק אמיתיים (חלקיים) מתוך היתר הקרינה - זה מה שמאפשר
+    // כיסוי מדויק יותר מהנחה גורפת לפי דור רשת בלבד
+    maxPowerDensity: ['עוצמה מרבית תיאורטית בµW לסמר', 'עוצמה מרבית תיאורטית בµW לסמ"ר', 'עוצמה מרבית תיאורטית'],
+    healthPercent: ['תוצאה מירבית ב% ביחס לסף הבריאות'],
+    permitDate: ['תאריך היתר הפעלה', 'תאריך היתר הקמה'],
+    lastTest: ['בדיקה תקופתית אחרונה'],
+    jurisdiction: ['תחום שיפוט'],
   };
 
   function normalizeProps(rawProps) {
@@ -32,16 +41,37 @@ const DataLoader = (() => {
       }
     }
     // נרמול דור הרשת לערכים אחידים: 2G/3G/4G/5G
+    // הרחבנו את הזיהוי כדי לתפוס גם שמות טכניים (GSM/UMTS/LTE/NR) ולא
+    // רק את המחרוזת "2G" המילולית, כי לא ידוע מראש איך בדיוק המשרד
+    // להגנת הסביבה מנסח את "טכנולוגיית שידור" בפועל.
     if (out.generation) {
       const g = String(out.generation).toUpperCase();
-      if (g.includes('5')) out.generation = '5G';
-      else if (g.includes('4') || g.includes('LTE')) out.generation = '4G';
-      else if (g.includes('3')) out.generation = '3G';
-      else if (g.includes('2')) out.generation = '2G';
+      if (/5G|NR\b|N78|N41|N77/.test(g)) out.generation = '5G';
+      else if (/4G|LTE/.test(g)) out.generation = '4G';
+      else if (/3G|UMTS|WCDMA|HSPA/.test(g)) out.generation = '3G';
+      else if (/2G|GSM|EDGE|GPRS/.test(g)) out.generation = '2G';
+      else if (out.generation.includes('חמיש')) out.generation = '5G';
+      else if (out.generation.includes('רביע')) out.generation = '4G';
+      else if (out.generation.includes('שליש')) out.generation = '3G';
+      else if (out.generation.includes('שני')) out.generation = '2G';
+      else out.generation = 'לא ידוע';
     } else {
       out.generation = 'לא ידוע';
     }
     if (!out.operator) out.operator = 'לא ידוע';
+
+    // נרמול נתוני הספק למספר (יש מקרים בהם השדה מגיע כמחרוזת עם
+    // תווים לא-מספריים, מקף למקום ריק וכו')
+    if (out.maxPowerDensity !== undefined) {
+      const cleaned = String(out.maxPowerDensity).replace(/[^\d.\-]/g, '');
+      const num = parseFloat(cleaned);
+      out.maxPowerDensity = isNaN(num) ? undefined : num;
+    }
+    if (out.healthPercent !== undefined) {
+      const cleaned = String(out.healthPercent).replace(/[^\d.\-]/g, '');
+      const num = parseFloat(cleaned);
+      out.healthPercent = isNaN(num) ? undefined : num;
+    }
     return out;
   }
 

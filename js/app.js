@@ -46,11 +46,45 @@ function densityFactor(grid, lat, lon) {
 }
 
 let densityIndex = null;
+let medianPowerByGen = {}; // מחושב מהנתונים בפועל לאחר הטעינה - ראו computeMedianPower
+
+function computeMedianPower(antennas) {
+  const byGen = {};
+  for (const a of antennas) {
+    const v = a.props.maxPowerDensity;
+    if (typeof v !== 'number' || isNaN(v) || v <= 0) continue;
+    const gen = a.props.generation;
+    (byGen[gen] = byGen[gen] || []).push(v);
+  }
+  const medians = {};
+  for (const [gen, vals] of Object.entries(byGen)) {
+    vals.sort((a, b) => a - b);
+    medians[gen] = vals[Math.floor(vals.length / 2)];
+  }
+  return medians;
+}
+
+/**
+ * מתאים את הרדיוס הבסיסי (לפי דור רשת + צפיפות) בהתבסס על הספק השידור
+ * התיאורטי האמיתי של האנטנה הספציפית הזו (מתוך היתר הקרינה), יחסית
+ * לחציון ההספק של אנטנות אחרות מאותו דור רשת בכל הארץ. פיזיקלית: אובדן
+ * מרחב חופשי (Free-Space Path Loss) גורם לכך שההספק המתקבל יורד ביחס
+ * ל-1/מרחק², כך שעבור סף קליטה קבוע, המרחק המקסימלי גדל ביחס ל-sqrt(הספק).
+ * זו עדיין הערכה (חסרים גובה/אזימוט/דגם), אבל מבוססת נתון אמיתי ולא ניחוש.
+ */
+function powerAdjustedRadius(a, baseRadius) {
+  const v = a.props.maxPowerDensity;
+  const median = medianPowerByGen[a.props.generation];
+  if (typeof v !== 'number' || isNaN(v) || v <= 0 || !median || median <= 0) return baseRadius;
+  const factor = Math.sqrt(v / median);
+  const clamped = Math.min(Math.max(factor, 0.5), 2.0); // מגבילים קיצוניות של חריגים
+  return Math.round(baseRadius * clamped);
+}
 
 function coverageRadiusFor(a) {
   const base = BASE_COVERAGE_RADIUS[a.props.generation] || 500;
-  if (!densityIndex) return base;
-  return Math.round(base * densityFactor(densityIndex, a.lat, a.lon));
+  const densityAdjusted = densityIndex ? Math.round(base * densityFactor(densityIndex, a.lat, a.lon)) : base;
+  return powerAdjustedRadius(a, densityAdjusted);
 }
 
 // צבעי ברירת מחדל למפעילים (יעודכן דינמית אם מזוהים מפעילים נוספים בנתונים)
@@ -77,8 +111,8 @@ function initMap() {
     .setView(ISRAEL_CENTER, 8);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-  const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors', maxZoom: 19,
+  const streets = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap contributors &copy; CARTO', maxZoom: 20,
   });
   const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     attribution: 'Tiles &copy; Esri', maxZoom: 19,
@@ -252,14 +286,54 @@ function makeIcon(color) {
 function buildPopup(a) {
   const p = a.props;
   const addr = [p.street, p.houseNumber].filter(Boolean).join(' ');
+  const powerLine = (typeof p.maxPowerDensity === 'number')
+    ? `<div class="popup-row"><b>הספק תיאורטי מרבי:</b> ${p.maxPowerDensity} µW/סמ"ר</div>` : '';
+  const healthLine = (typeof p.healthPercent === 'number')
+    ? `<div class="popup-row"><b>% מסף בריאות (מדידה):</b> ${p.healthPercent}%</div>` : '';
   return `
     <div class="popup-title">${p.operator || 'מפעיל לא ידוע'}</div>
     <div class="popup-row">${genDot(p.generation)} ${p.status ? '<span style="color:#9ca3af">(' + p.status + ')</span>' : ''}</div>
     ${addr ? `<div class="popup-row"><b>כתובת:</b> ${addr}</div>` : ''}
     ${p.city ? `<div class="popup-row"><b>יישוב:</b> ${p.city}</div>` : ''}
+    ${p.siteType ? `<div class="popup-row"><b>סוג אתר:</b> ${p.siteType}</div>` : ''}
+    ${powerLine}
+    ${healthLine}
     ${p.id ? `<div class="popup-row"><b>מזהה מוקד:</b> ${p.id}</div>` : ''}
     <div class="popup-row" style="margin-top:6px;color:#6b7280">מיקום: ${a.lat.toFixed(5)}, ${a.lon.toFixed(5)}</div>
+    <button class="adv-coverage-btn">🔬 חשב כיסוי מדויק יותר (תבליט+תכסית, בטא)</button>
+    <div class="adv-coverage-status"></div>
   `;
+}
+
+let advancedCoverageLayer = null;
+
+async function runAdvancedCoverage(a, marker) {
+  const popupEl = marker.getPopup()._contentNode;
+  const btn = popupEl.querySelector('.adv-coverage-btn');
+  const statusEl = popupEl.querySelector('.adv-coverage-status');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ מחשב תבליט + תכסית (עד כמה שניות)...'; }
+
+  try {
+    const baseRadius = coverageRadiusFor(a);
+    const { polygon, usedClutter, source, computedAt } = await TerrainCoverage.computeCoverage(a, baseRadius);
+
+    if (advancedCoverageLayer) map.removeLayer(advancedCoverageLayer);
+    advancedCoverageLayer = L.polygon(polygon, {
+      color: '#f97316', weight: 2, dashArray: '6 4',
+      fillColor: '#f97316', fillOpacity: 0.15,
+    }).addTo(map);
+
+    const clutterNote = usedClutter ? ' + תכסית (יער/עירוני/מים)' : ' (תכסית לא זמינה כרגע - רק תבליט)';
+    const sourceNote = source === 'precomputed'
+      ? ` <span style="color:#34d399">(מוכן מראש${computedAt ? ', מ-' + new Date(computedAt).toLocaleDateString('he-IL') : ''})</span>`
+      : ' <span style="color:#9ca3af">(חושב עכשיו בזמן אמת)</span>';
+    if (statusEl) statusEl.innerHTML = `<div class="popup-row" style="color:#f97316">✓ מוצג "ענן" מבוסס תבליט${clutterNote}${sourceNote} - עדיין הערכה, לא מדידת הספק אמיתית</div>`;
+    if (btn) { btn.textContent = '🔬 חשב שוב'; btn.disabled = false; }
+  } catch (e) {
+    console.error(e);
+    if (statusEl) statusEl.innerHTML = '<div class="popup-row" style="color:#f87171">שגיאה בחישוב (שירות נתוני חוץ לא זמין כרגע)</div>';
+    if (btn) { btn.textContent = '🔬 חשב כיסוי מדויק יותר (תבליט+תכסית, בטא)'; btn.disabled = false; }
+  }
 }
 
 function passesFilter(a) {
@@ -289,6 +363,11 @@ function renderAntennas() {
     const color = OPERATOR_COLORS[a.props.operator] || GEN_COLORS[a.props.generation] || '#38bdf8';
     const marker = L.marker([a.lat, a.lon], { icon: makeIcon(color) });
     marker.bindPopup(buildPopup(a));
+    marker.on('popupopen', () => {
+      const popupEl = marker.getPopup()._contentNode;
+      const btn = popupEl.querySelector('.adv-coverage-btn');
+      if (btn) btn.addEventListener('click', () => runAdvancedCoverage(a, marker));
+    });
     source.addLayer(marker);
 
     if (state.showCoverage) {
@@ -395,6 +474,25 @@ function wireOfflineBadge() {
   update();
 }
 
+async function loadPrecomputeStatus() {
+  const box = document.getElementById('precomputeStatusBox');
+  try {
+    const res = await fetch('data/coverage-precompute-state.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error('no state file yet');
+    const state = await res.json();
+    const total = state.total_antennas || allAntennas.length;
+    const pct = total ? Math.min(100, Math.round((state.offset / total) * 100)) : 0;
+    const lastRun = state.last_run ? new Date(state.last_run).toLocaleDateString('he-IL') : 'טרם רץ';
+    box.innerHTML = `
+      <div>סבב נוכחי: <b>${pct}%</b> מהאנטנות חושבו מראש</div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:2px">ריצה אחרונה: ${lastRun}${state.cycles_completed ? ' · סבבים שהושלמו: ' + state.cycles_completed : ''}</div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:4px">אנטנות שעוד לא הגיע תורן יחושבו בזמן אמת בלחיצה (איטי יותר)</div>
+    `;
+  } catch {
+    box.innerHTML = '<div class="mini-empty">החישוב הלילי טרם רץ - כל לחיצה על "כיסוי מדויק" תיפול לחישוב חי</div>';
+  }
+}
+
 function wireSidePanel() {
   const panel = document.getElementById('sidePanel');
   const overlay = document.getElementById('sideOverlay');
@@ -485,6 +583,7 @@ async function boot() {
     allAntennas = data.active;
     window._plannedAntennas = data.planned;
     densityIndex = buildDensityIndex(allAntennas);
+    medianPowerByGen = computeMedianPower(allAntennas);
 
     buildOperatorFilters();
     renderAntennas();
@@ -506,6 +605,8 @@ async function boot() {
 
     const history = await HistoryTrend.load();
     HistoryTrend.renderInto(document.getElementById('historyBox'), history, null);
+
+    loadPrecomputeStatus();
   } catch (err) {
     console.error(err);
     errorBanner.textContent = 'שגיאה בטעינת נתוני האנטנות. בדוק את חיבור האינטרנט ונסה שוב.';
