@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 COVERAGE_DIR = DATA_DIR / "coverage"
 STATE_PATH = DATA_DIR / "coverage-precompute-state.json"
+LANDCOVER_PATH = DATA_DIR / "landcover-israel.json"
 
 # --- פרמטרים (תואמים בדיוק ל-js/terrain-coverage.js, כדי שהתוצאות יהיו זהות) ---
 RAYS = 16
@@ -43,11 +44,15 @@ ANTENNA_HEIGHT = 30
 RECEIVER_HEIGHT = 1.5
 K_FACTOR = 4 / 3
 
-CLUTTER_QUERY_DELAY = 2.5   # שניות בין קריאות ל-Overpass (fair use) - הוגדל בעקבות 429/504 בפועל
+LANDCOVER_CELL_DEG = 0.05  # ~5 ק"מ, גודל תא לאינדקס המרחבי של התכסית
+
 ELEVATION_BATCH_DELAY = 1.1  # שניות בין batches ל-opentopodata
 
-# כמה שרתי Overpass ציבוריים חלופיים - אם אחד עמוס/חוסם, מנסים את הבא.
-# overpass-api.de (הראשי) התגלה כעמוס מאוד בפועל (504/429 חוזרים).
+# --- Overpass: משמש רק כ-fallback חד-פעמי אם data/landcover-israel.json
+# עוד לא קיים (למשל לפני ההרצה הראשונה של update-landcover.yml). בפועל
+# התגלה לא אמין בנפח הנדרש (429/504 חוזרים על אלפי אנטנות) - הפתרון
+# העיקרי עכשיו הוא קובץ תכסית מקומי שמעובד מראש (ראו fetch_landcover.py).
+CLUTTER_QUERY_DELAY = 2.5
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -187,10 +192,58 @@ def clutter_at(lat, lon, polygons):
     return "open"
 
 
-def process_antenna(lat, lon):
+# --- שכבת "תכסית מקומית" (data/landcover-israel.json, נבנה ע"י
+# scripts/fetch_landcover.py) - זו הדרך המועדפת עכשיו, במקום קריאות
+# Overpass חיות שהתגלו לא אמינות בנפח הנדרש. ---
+
+def load_landcover_bundle():
+    if not LANDCOVER_PATH.exists():
+        return None
+    try:
+        return json.loads(LANDCOVER_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def build_landcover_index(bundle):
+    """אינדקס grid מרחבי: לכל תא, רשימת הפוליגונים שחופפים אליו (לפי
+    bounding box). מאפשר לשלוף רק פוליגונים רלוונטיים לכל אנטנה במקום
+    לבדוק את כל אלפי הפוליגונים בארץ עבור כל נקודה."""
+    grid = {}
+    for poly in bundle:
+        lats = [p[0] for p in poly["points"]]
+        lons = [p[1] for p in poly["points"]]
+        min_cy, max_cy = int(min(lats) / LANDCOVER_CELL_DEG), int(max(lats) / LANDCOVER_CELL_DEG)
+        min_cx, max_cx = int(min(lons) / LANDCOVER_CELL_DEG), int(max(lons) / LANDCOVER_CELL_DEG)
+        for cy in range(min_cy, max_cy + 1):
+            for cx in range(min_cx, max_cx + 1):
+                grid.setdefault((cy, cx), []).append(poly)
+    return grid
+
+
+def clutter_polygons_from_index(lat, lon, index):
+    cy, cx = int(lat / LANDCOVER_CELL_DEG), int(lon / LANDCOVER_CELL_DEG)
+    seen_ids = set()
+    result = []
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            for poly in index.get((cy + dy, cx + dx), []):
+                pid = id(poly)
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                result.append(poly)
+    return result
+
+
+def process_antenna(lat, lon, landcover_index):
     """מחשב עבור אנטנה אחת: לכל אחת מ-RAYS כיוונים, מרחק חסימת קו-ראייה
     (מבוסס תבליט) וקטגוריית תכסית. פורמט התוצאה תואם בדיוק את מה ש-
-    js/terrain-coverage.js מצפה לו (ראו usePrecomputed בקובץ ה-JS)."""
+    js/terrain-coverage.js מצפה לו (ראו usePrecomputed בקובץ ה-JS).
+
+    landcover_index=None -> אין קובץ תכסית מקומי עדיין (למשל לפני
+    ההרצה הראשונה של update-landcover.yml) -> נופלים חזרה ל-Overpass
+    חי כ-fallback (איטי יותר, פחות אמין - ראו הערה למעלה)."""
     ray_points = []
     ray_start_idx = []
     for r in range(RAYS):
@@ -203,11 +256,18 @@ def process_antenna(lat, lon):
 
     all_points = [(lat, lon)] + [(p[0], p[1]) for p in ray_points]
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        fut_elev = ex.submit(fetch_elevations_batch, all_points)
-        fut_clutter = ex.submit(fetch_clutter_polygons, lat, lon, MAX_DIST)
-        elevations = fut_elev.result()
-        clutter_polys = fut_clutter.result()
+    if landcover_index is not None:
+        # מקומי לגמרי - מיידי, בלי שום קריאת רשת
+        elevations = fetch_elevations_batch(all_points)
+        clutter_polys = clutter_polygons_from_index(lat, lon, landcover_index)
+    else:
+        # fallback: אין עדיין קובץ תכסית מקומי - קריאה חיה ל-Overpass
+        # (במקביל לתבליט, כדי לא להכפיל את זמן ההמתנה)
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_elev = ex.submit(fetch_elevations_batch, all_points)
+            fut_clutter = ex.submit(fetch_clutter_polygons, lat, lon, MAX_DIST)
+            elevations = fut_elev.result()
+            clutter_polys = fut_clutter.result()
 
     antenna_ground = elevations[0] or 0
     antenna_total_h = antenna_ground + ANTENNA_HEIGHT
@@ -286,6 +346,15 @@ def main():
         print("אין אנטנות לעבד", file=sys.stderr)
         return
 
+    landcover_bundle = load_landcover_bundle()
+    if landcover_bundle is not None:
+        print(f"✓ נטען קובץ תכסית מקומי: {len(landcover_bundle)} פוליגונים - בדיקת תכסית תהיה מקומית ומיידית", file=sys.stderr)
+        landcover_index = build_landcover_index(landcover_bundle)
+    else:
+        print("⚠️ אין עדיין data/landcover-israel.json (הריצו את update-landcover.yml פעם אחת) - "
+              "נופלים זמנית ל-Overpass חי (איטי, עשוי להיכשל בחלק מהאנטנות)", file=sys.stderr)
+        landcover_index = None
+
     COVERAGE_DIR.mkdir(parents=True, exist_ok=True)
     state = load_state()
     offset = state.get("offset", 0) % n
@@ -300,7 +369,7 @@ def main():
         key = antenna_key(antenna["props"], antenna["lat"], antenna["lon"])
         out_path = COVERAGE_DIR / f"{key}.json"
         try:
-            result = process_antenna(antenna["lat"], antenna["lon"])
+            result = process_antenna(antenna["lat"], antenna["lon"], landcover_index)
             out_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             print(f"  שגיאה באנטנה {key}: {e}", file=sys.stderr)
