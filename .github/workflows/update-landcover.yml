@@ -1,0 +1,40 @@
+name: עדכון נתוני תכסית (landcover)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # פעם בחודש (ב-1 לחודש, 02:00 UTC) - תכסית (יער/מים/בינוי) כמעט
+    # ולא משתנה, אין שום צורך בתדירות גבוהה יותר
+    - cron: '0 2 1 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  update-landcover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: התקנת pyosmium
+        run: pip install osmium --break-system-packages
+
+      - name: הרצת שליפת תכסית (הורדת extract + סינון מקומי)
+        run: python3 scripts/fetch_landcover.py
+
+      - name: קומיט ופוש
+        run: |
+          git config user.name "antenna-landcover-bot"
+          git config user.email "actions@github.com"
+          git add data/landcover-israel.json
+          if git diff --cached --quiet; then
+            echo "אין שינויים בנתוני התכסית"
+          else
+            git commit -m "עדכון נתוני תכסית (landcover) $(date -u +'%Y-%m-%d')"
+            git push
+          fi
