@@ -6,8 +6,8 @@
  *    כך שאזור שכבר גלשת בו יעבוד גם בלי רשת.
  */
 
-const SHELL_CACHE = 'antenna-shell-v1';
-const DATA_CACHE = 'antenna-data-v1';
+const SHELL_CACHE = 'antenna-shell-v2';
+const DATA_CACHE = 'antenna-data-v2';
 const TILE_CACHE = 'antenna-tiles-v1';
 
 const SHELL_FILES = [
@@ -19,6 +19,7 @@ const SHELL_FILES = [
   './js/reports.js',
   './js/history.js',
   './js/saved-addresses.js',
+  './js/terrain-coverage.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -77,10 +78,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // שאר קבצי האפליקציה (App Shell) - cache-first
+  // שאר קבצי האפליקציה (App Shell): קוד (html/js/css) - network-first כדי
+  // שעדכונים יגיעו מיד בפעם הבאה שיש רשת, עם נפילה לקאש אם אין רשת.
+  // קבצים סטטיים שכמעט לא משתנים (אייקונים) - cache-first לביצועים.
   if (url.origin === self.location.origin) {
-    event.respondWith(
-      caches.match(event.request).then((cached) => cached || fetch(event.request))
-    );
+    const isCodeFile = /\.(html|js|css|json)$/.test(url.pathname) || url.pathname.endsWith('/');
+    if (isCodeFile) {
+      event.respondWith(
+        fetch(event.request).then((resp) => {
+          const clone = resp.clone();
+          caches.open(SHELL_CACHE).then((cache) => cache.put(event.request, clone));
+          return resp;
+        }).catch(() => caches.match(event.request))
+      );
+    } else {
+      event.respondWith(
+        caches.match(event.request).then((cached) => cached || fetch(event.request))
+      );
+    }
   }
 });
