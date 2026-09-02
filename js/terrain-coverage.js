@@ -115,6 +115,13 @@ const TerrainCoverage = (() => {
   }
 
   /* ===================== תכסית (landuse) דרך Overpass ===================== */
+  // מספר שרתים ציבוריים - overpass-api.de התגלה עמוס מאוד בפועל
+  // (504/429 תכופים), אז מנסים גם חלופות לפני שמוותרים.
+  const OVERPASS_ENDPOINTS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.openstreetmap.ru/api/interpreter',
+  ];
 
   async function fetchClutterPolygons(lat, lon, radiusM) {
     const query = `[out:json][timeout:20];(
@@ -126,27 +133,31 @@ const TerrainCoverage = (() => {
       way["landuse"="commercial"](around:${radiusM},${lat},${lon});
       way["landuse"="industrial"](around:${radiusM},${lat},${lon});
     );out geom;`;
-    try {
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: 'data=' + encodeURIComponent(query),
-      });
-      if (!res.ok) throw new Error('Overpass HTTP ' + res.status);
-      const data = await res.json();
-      return (data.elements || [])
-        .filter(el => el.geometry && el.geometry.length > 2)
-        .map(el => {
-          let category = 'open';
-          const tags = el.tags || {};
-          if (tags.natural === 'wood' || tags.landuse === 'forest') category = 'forest';
-          else if (tags.natural === 'water' || tags.landuse === 'reservoir') category = 'water';
-          else if (['residential', 'commercial', 'industrial'].includes(tags.landuse)) category = 'urban';
-          return { category, points: el.geometry.map(g => [g.lat, g.lon]) };
+
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          body: 'data=' + encodeURIComponent(query),
         });
-    } catch (e) {
-      console.warn('שגיאה בשליפת נתוני תכסית (Overpass)', e);
-      return []; // כישלון שקט - נמשיך בלי תכסית, עדיין יש תבליט
+        if (!res.ok) throw new Error('Overpass HTTP ' + res.status);
+        const data = await res.json();
+        return (data.elements || [])
+          .filter(el => el.geometry && el.geometry.length > 2)
+          .map(el => {
+            let category = 'open';
+            const tags = el.tags || {};
+            if (tags.natural === 'wood' || tags.landuse === 'forest') category = 'forest';
+            else if (tags.natural === 'water' || tags.landuse === 'reservoir') category = 'water';
+            else if (['residential', 'commercial', 'industrial'].includes(tags.landuse)) category = 'urban';
+            return { category, points: el.geometry.map(g => [g.lat, g.lon]) };
+          });
+      } catch (e) {
+        console.warn(`שגיאה בשליפת תכסית מ-${endpoint}`, e);
+        // ממשיכים לשרת הבא ברשימה
+      }
     }
+    return []; // כל השרתים נכשלו - כישלון שקט, נמשיך בלי תכסית (עדיין יש תבליט)
   }
 
   // Ray-casting point-in-polygon סטנדרטי
