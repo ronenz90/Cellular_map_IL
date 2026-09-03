@@ -31,7 +31,21 @@ jobs:
           git add data/
           if git diff --cached --quiet; then
             echo "אין שינויים בנתונים"
-          else
-            git commit -m "עדכון אוטומטי לנתוני אנטנות $(date -u +'%Y-%m-%d')"
-            git push
+            exit 0
           fi
+          git commit -m "עדכון אוטומטי לנתוני אנטנות $(date -u +'%Y-%m-%d')"
+
+          # אם בינתיים נדחף commit אחר ל-main (למשל ה-precompute הלילי
+          # הארוך שעדיין רץ) - מושכים ומנסים שוב במקום לאבד את השליפה
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "✓ נדחף בהצלחה (ניסיון $attempt)"
+              exit 0
+            fi
+            echo "⚠️ push נדחה (ניסיון $attempt) - מושכים עם rebase ומנסים שוב..."
+            git fetch origin main
+            git rebase origin/main
+          done
+
+          echo "❌ נכשל לדחוף אחרי 5 ניסיונות"
+          exit 1

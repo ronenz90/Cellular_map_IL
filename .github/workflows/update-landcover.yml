@@ -34,7 +34,19 @@ jobs:
           git add data/landcover-israel.json
           if git diff --cached --quiet; then
             echo "אין שינויים בנתוני התכסית"
-          else
-            git commit -m "עדכון נתוני תכסית (landcover) $(date -u +'%Y-%m-%d')"
-            git push
+            exit 0
           fi
+          git commit -m "עדכון נתוני תכסית (landcover) $(date -u +'%Y-%m-%d')"
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "✓ נדחף בהצלחה (ניסיון $attempt)"
+              exit 0
+            fi
+            echo "⚠️ push נדחה (ניסיון $attempt) - מושכים עם rebase ומנסים שוב..."
+            git fetch origin main
+            git rebase origin/main
+          done
+
+          echo "❌ נכשל לדחוף אחרי 5 ניסיונות"
+          exit 1

@@ -47,8 +47,24 @@ jobs:
           git add data/coverage/ data/coverage-precompute-state.json
           if git diff --cached --quiet; then
             echo "אין קבצי כיסוי חדשים"
-          else
-            COUNT=$(git diff --cached --name-only | grep -c '^data/coverage/' || true)
-            git commit -m "חישוב מקדים לילי לכיסוי: כ-$COUNT קבצים עודכנו"
-            git push
+            exit 0
           fi
+          COUNT=$(git diff --cached --name-only | grep -c '^data/coverage/' || true)
+          git commit -m "חישוב מקדים לילי לכיסוי: כ-$COUNT קבצים עודכנו"
+
+          # הריצה הזו לוקחת עד כמה שעות - אם בינתיים נדחף commit אחר
+          # ל-main (למשל עדכון האנטנות היומי), ה-push הרגיל יידחה כי
+          # זה כבר לא fast-forward. במקום לאבד את כל העבודה, מושכים
+          # (rebase) את השינויים המרוחקים ומנסים שוב, עד 5 פעמים.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "✓ נדחף בהצלחה (ניסיון $attempt)"
+              exit 0
+            fi
+            echo "⚠️ push נדחה (ניסיון $attempt) - כנראה יש commit חדש יותר ב-main. מושכים עם rebase ומנסים שוב..."
+            git fetch origin main
+            git rebase origin/main
+          done
+
+          echo "❌ נכשל לדחוף אחרי 5 ניסיונות"
+          exit 1
