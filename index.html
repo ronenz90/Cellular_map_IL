@@ -92,6 +92,12 @@
     </div>
 
     <div class="panel-section">
+      <h3>🏆 מכרז ספקים בנקודה</h3>
+      <p class="section-hint">בודק איזה מפעיל נותן את הקליטה המשוערת הטובה ביותר בנקודה נבחרת, לפי חתך דורות הרשת.</p>
+      <button id="tenderModeBtn" class="secondary-btn">📍 בחר נקודה על המפה</button>
+    </div>
+
+    <div class="panel-section">
       <h3>דיווחי קליטה חלשה</h3>
       <p class="section-hint">דיווחים נשמרים במכשיר שלך בלבד.</p>
       <button id="reportModeBtn" class="secondary-btn">📍 סמן נקודת קליטה חלשה על המפה</button>
@@ -131,6 +137,7 @@
   <!-- Info drawer for a selected antenna (mobile-friendly bottom sheet) -->
   <div id="infoSheet" class="info-sheet hidden">
     <div class="sheet-handle"></div>
+    <button id="infoSheetClose" class="sheet-close">✕</button>
     <div id="infoSheetContent"></div>
   </div>
 
@@ -143,6 +150,7 @@
 <script src="js/history.js"></script>
 <script src="js/saved-addresses.js"></script>
 <script src="js/terrain-coverage.js"></script>
+<script src="js/operator-tender.js"></script>
 <script src="js/app.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
