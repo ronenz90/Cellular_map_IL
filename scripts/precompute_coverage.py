@@ -321,7 +321,7 @@ def load_state():
             return json.loads(STATE_PATH.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             pass
-    return {"offset": 0, "cycles_completed": 0}
+    return {"offset": 0, "cycles_completed": 0, "total_processed_ever": 0}
 
 
 def save_state(state):
@@ -358,6 +358,7 @@ def main():
     COVERAGE_DIR.mkdir(parents=True, exist_ok=True)
     state = load_state()
     offset = state.get("offset", 0) % n
+    total_processed_ever = state.get("total_processed_ever", 0)
     processed = 0
     i = offset
 
@@ -379,12 +380,16 @@ def main():
 
         if processed % SAVE_EVERY == 0:
             new_offset = i % n
-            cycles = state.get("cycles_completed", 0) + (1 if new_offset < offset else 0)
+            # ספירת סבבים מבוססת על סה"כ מצטבר שעובד אי-פעם (חלוקה שלמה
+            # ב-n), לא על השוואת offset שהייתה שבורה (מתעדכנת פעם אחת
+            # בלבד לכל מעבר סיבוב, לא בכל checkpoint אחרי המעבר)
+            cycles = (total_processed_ever + processed) // n
             state.update({
                 "offset": new_offset,
                 "last_run": datetime.now(timezone.utc).isoformat(),
                 "processed_last_run": processed,
                 "total_antennas": n,
+                "total_processed_ever": total_processed_ever + processed,
                 "cycles_completed": cycles,
             })
             save_state(state)
@@ -397,17 +402,18 @@ def main():
             break
 
     final_offset = i % n
-    cycles = state.get("cycles_completed", 0) + (1 if processed >= n else 0)
+    cycles = (total_processed_ever + processed) // n
     state.update({
         "offset": final_offset,
         "last_run": datetime.now(timezone.utc).isoformat(),
         "processed_last_run": processed,
         "total_antennas": n,
+        "total_processed_ever": total_processed_ever + processed,
         "cycles_completed": cycles,
     })
     save_state(state)
     print(f"סיום ריצה: עובדו {processed} אנטנות ({processed/n*100:.1f}% מסבב אחד). "
-          f"offset הבא: {final_offset}/{n}. סבבים שהושלמו: {cycles}", file=sys.stderr)
+          f"offset הבא: {final_offset}/{n}. סבבים שהושלמו (מצטבר): {cycles}", file=sys.stderr)
 
 
 if __name__ == "__main__":
