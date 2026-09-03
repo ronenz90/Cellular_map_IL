@@ -94,7 +94,9 @@ const OPERATOR_COLORS = {
   'PHI': '#22c55e', "פי.אייץ'.איי": '#22c55e', 'לא ידוע': '#9ca3af',
 };
 
-let map, clusterGroup, plainLayerGroup, coverageLayer, plannedLayer, reportsLayer;
+let map, clusterGroup, plainLayerGroup, coverageLayer, plannedLayer, reportsLayer, canvasRenderer;
+let markersById = new Map();
+let visibleFilteredAntennas = [];
 let allAntennas = [];
 let reportMode = false;
 let state = {
@@ -140,6 +142,8 @@ function initMap() {
     });
   });
 
+  canvasRenderer = L.canvas({ padding: 0.5 }); // ציור מהיר בהרבה מ-SVG לאלפי מעגלי כיסוי
+
   clusterGroup = L.markerClusterGroup({ maxClusterRadius: 55, disableClusteringAtZoom: 17 });
   plainLayerGroup = L.layerGroup();
   coverageLayer = L.layerGroup();
@@ -151,6 +155,14 @@ function initMap() {
   map.addLayer(reportsLayer);
 
   map.fitBounds(ISRAEL_BOUNDS);
+
+  // בזום/תזוזה - מרעננים רק את מעגלי הכיסוי (לא בונים מחדש את כל
+  // המרקרים) כי הם היחידים שתלויים בתצוגה הנוכחית (viewport culling)
+  let coverageRefreshTimer = null;
+  map.on('moveend zoomend', () => {
+    clearTimeout(coverageRefreshTimer);
+    coverageRefreshTimer = setTimeout(renderCoverageInViewport, 150);
+  });
 
   // לחיצה על המפה במצב "דיווח" -> פתיחת טופס דיווח נקודת קליטה חלשה
   map.on('click', (e) => {
@@ -357,10 +369,11 @@ function passesFilter(a) {
 function renderAntennas() {
   clusterGroup.clearLayers();
   plainLayerGroup.clearLayers();
-  coverageLayer.clearLayers();
   plannedLayer.clearLayers();
 
   let visibleCount = 0;
+  markersById.clear();
+  visibleFilteredAntennas = [];
 
   const source = state.useCluster ? clusterGroup : plainLayerGroup;
   if (!state.useCluster && !map.hasLayer(plainLayerGroup)) map.addLayer(plainLayerGroup);
@@ -368,30 +381,37 @@ function renderAntennas() {
   if (state.useCluster && map.hasLayer(plainLayerGroup)) map.removeLayer(plainLayerGroup);
   if (!state.useCluster && map.hasLayer(clusterGroup)) map.removeLayer(clusterGroup);
 
+  // בונים מערך של כל המרקרים ומוסיפים בבת אחת (addLayers) במקום
+  // addLayer בלולאה - שיפור ביצועים משמעותי ל-Leaflet.markercluster
+  // עם אלפי נקודות (מומלץ רשמית ע"י התיעוד של הספרייה לנתונים גדולים)
+  const markersToAdd = [];
+
   for (const a of allAntennas) {
     if (!passesFilter(a)) continue;
     visibleCount++;
+    visibleFilteredAntennas.push(a);
     const color = OPERATOR_COLORS[a.props.operator] || GEN_COLORS[a.props.generation] || '#38bdf8';
     const marker = L.marker([a.lat, a.lon], { icon: makeIcon(color) });
-    marker.bindPopup(buildPopup(a));
+    marker.bindPopup(() => buildPopup(a)); // פונקציה עצלה - בונים HTML רק כשבאמת פותחים פופ-אפ, לא מראש לכל 8000+ מרקרים
     marker.on('popupopen', () => {
       const popupEl = marker.getPopup()._contentNode;
       const btn = popupEl.querySelector('.adv-coverage-btn');
       if (btn) btn.addEventListener('click', () => runAdvancedCoverage(a, marker));
     });
-    source.addLayer(marker);
-
-    if (state.showCoverage) {
-      const radius = coverageRadiusFor(a);
-      L.circle([a.lat, a.lon], {
-        radius, color, weight: 1, fillColor: color, fillOpacity: 0.08, opacity: 0.35,
-      }).addTo(coverageLayer);
-    }
+    markersToAdd.push(marker);
   }
+
+  if (state.useCluster) {
+    clusterGroup.addLayers(markersToAdd); // batch add - הרבה יותר מהיר מלולאה
+  } else {
+    markersToAdd.forEach(m => plainLayerGroup.addLayer(m));
+  }
+
+  renderCoverageInViewport(); // מעגלי כיסוי - רק מה שבתוך תצוגת המפה כרגע, ראו הפונקציה
 
   // אנטנות בהקמה (מוצג נפרד, אייקון שונה)
   if (state.showPlanned) {
-    for (const a of window._plannedAntennas || []) {
+    const plannedMarkers = (window._plannedAntennas || []).map(a => {
       const marker = L.marker([a.lat, a.lon], {
         icon: L.divIcon({
           className: '',
@@ -399,9 +419,10 @@ function renderAntennas() {
           iconSize: [12, 12],
         }),
       });
-      marker.bindPopup(buildPopup(a));
-      plannedLayer.addLayer(marker);
-    }
+      marker.bindPopup(() => buildPopup(a));
+      return marker;
+    });
+    plannedMarkers.forEach(m => plannedLayer.addLayer(m));
     plannedLayer.addTo(map);
   } else {
     map.removeLayer(plannedLayer);
@@ -427,6 +448,33 @@ function renderAntennas() {
   }
 }
 
+/**
+ * מצייר מעגלי כיסוי רק לאנטנות שבתוך תצוגת המפה הנוכחית (+ מרווח קטן),
+ * ורק מזום מסוים ומעלה. בזום ארצי, אלפי מעגלים חופפים ממילא לא ניתנים
+ * לפענוח ויזואלית - וזה בזבוז עיבוד עצום. משתמשים ב-canvas renderer
+ * (הרבה יותר מהיר מ-SVG לכמויות גדולות של צורות).
+ */
+const MIN_ZOOM_FOR_COVERAGE = 10;
+
+function renderCoverageInViewport() {
+  coverageLayer.clearLayers();
+  if (!state.showCoverage) return;
+  if (map.getZoom() < MIN_ZOOM_FOR_COVERAGE) return;
+
+  const bounds = map.getBounds().pad(0.2);
+  const circles = [];
+  for (const a of visibleFilteredAntennas) {
+    if (!bounds.contains([a.lat, a.lon])) continue;
+    const color = OPERATOR_COLORS[a.props.operator] || GEN_COLORS[a.props.generation] || '#38bdf8';
+    const radius = coverageRadiusFor(a);
+    circles.push(L.circle([a.lat, a.lon], {
+      radius, color, weight: 1, fillColor: color, fillOpacity: 0.08, opacity: 0.35,
+      renderer: canvasRenderer,
+    }));
+  }
+  circles.forEach(c => coverageLayer.addLayer(c));
+}
+
 function buildOperatorFilters() {
   const operators = [...new Set(allAntennas.map(a => a.props.operator))].sort();
   const container = document.getElementById('operatorFilters');
@@ -446,9 +494,19 @@ function buildOperatorFilters() {
       const checked = [...container.querySelectorAll('input:checked')].map(i => i.value);
       const total = container.querySelectorAll('input').length;
       state.operators = checked.length === total ? new Set() : new Set(checked);
-      renderAntennas();
+      scheduleRenderAntennas();
     });
   });
+}
+
+// עוטפים את renderAntennas ב-debounce+setTimeout: הצ'קבוקס עצמו מגיב
+// מיד (הדפדפן מצייר את שינוי המצב שלו לפני שהקוד הכבד מתחיל לרוץ),
+// וטוגלים מהירים ברצף (למשל כמה מפעילים אחד אחרי השני) גורמים לרינדור
+// אחד בלבד במקום אחד לכל קליק.
+let renderDebounceTimer = null;
+function scheduleRenderAntennas() {
+  clearTimeout(renderDebounceTimer);
+  renderDebounceTimer = setTimeout(renderAntennas, 80);
 }
 
 function wireFilters() {
@@ -457,21 +515,21 @@ function wireFilters() {
       state.generations = new Set(
         [...document.getElementById('genFilters').querySelectorAll('input:checked')].map(i => i.value)
       );
-      renderAntennas();
+      scheduleRenderAntennas();
     });
   });
 
   document.getElementById('toggleCoverage').addEventListener('change', (e) => {
     state.showCoverage = e.target.checked;
-    renderAntennas();
+    scheduleRenderAntennas();
   });
   document.getElementById('toggleCluster').addEventListener('change', (e) => {
     state.useCluster = e.target.checked;
-    renderAntennas();
+    scheduleRenderAntennas();
   });
   document.getElementById('toggleHakama').addEventListener('change', (e) => {
     state.showPlanned = e.target.checked;
-    renderAntennas();
+    scheduleRenderAntennas();
   });
   document.getElementById('toggleReports').addEventListener('change', (e) => {
     state.showReports = e.target.checked;
