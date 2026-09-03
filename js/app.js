@@ -166,12 +166,107 @@ function initMap() {
 
   // לחיצה על המפה במצב "דיווח" -> פתיחת טופס דיווח נקודת קליטה חלשה
   map.on('click', (e) => {
-    if (!reportMode) return;
-    openReportForm(e.latlng);
+    if (reportMode) { openReportForm(e.latlng); return; }
+    if (tenderMode) { runTenderAt(e.latlng.lat, e.latlng.lng); setTenderMode(false); return; }
   });
 }
 
-/* ================= דיווחי קליטה חלשה ================= */
+/* ================= מכרז ספקים ================= */
+
+let tenderMode = false;
+let tenderMarker = null;
+
+function setTenderMode(on) {
+  tenderMode = on;
+  if (on && reportMode) setReportMode(false);
+  const btn = document.getElementById('tenderModeBtn');
+  btn.classList.toggle('active', on);
+  btn.textContent = on ? '❌ בטל (לחץ על המפה)' : '📍 בחר נקודה על המפה';
+  document.getElementById('map').style.cursor = on ? 'crosshair' : '';
+}
+
+function tenderGenBadges(entry) {
+  const order = ['5G', '4G', '3G', '2G', 'אחר', 'לא ידוע'];
+  return order
+    .filter(g => entry.byGeneration[g])
+    .map(g => `<span class="tender-gen-chip">${g}: ${Math.round(entry.byGeneration[g].score)}</span>`)
+    .join('');
+}
+
+const TERRAIN_SOURCE_LABEL = {
+  precomputed: '✓ מבוסס תבליט+תכסית (מוכן מראש)',
+  live: '✓ מבוסס תבליט (חושב עכשיו)',
+  fallback: '⚠️ הערכת מרחק בלבד (אין נתוני תבליט זמינים)',
+};
+const TERRAIN_SOURCE_COLOR = { precomputed: '#34d399', live: '#38bdf8', fallback: '#fbbf24' };
+
+function renderTenderResults(tender) {
+  const content = document.getElementById('infoSheetContent');
+  const { results, point, terrainStats } = tender;
+
+  if (!results.length) {
+    content.innerHTML = `
+      <div class="tender-title">🏆 מכרז ספקים</div>
+      <div class="tender-subtitle">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</div>
+      <div class="tender-empty">לא נמצאו אנטנות בטווח ${(tender.searchRadius / 1000).toFixed(0)} ק"מ מהנקודה הזו</div>
+    `;
+  } else {
+    const rows = results.map((r, i) => {
+      const src = r.bestTerrainSource || 'fallback';
+      return `
+      <div class="tender-row ${i === 0 ? 'winner' : ''}">
+        <div class="tender-row-head">
+          <span class="tender-rank">${i === 0 ? '🏆' : `#${i + 1}`}</span>
+          <span class="tender-op-name">${r.operator}</span>
+          <span class="tender-score">${Math.round(r.bestScore)}/100</span>
+        </div>
+        <div class="tender-bar-bg"><div class="tender-bar-fill" style="width:${Math.round(r.bestScore)}%"></div></div>
+        <div class="tender-meta">אנטנה מובילה: ${Math.round(r.bestDistance)} מ' (${r.bestGeneration}) · ${r.antennaCount} אנטנות בטווח</div>
+        <div class="tender-gen-breakdown">${tenderGenBadges(r)}</div>
+        <div class="tender-los-status" style="color:${TERRAIN_SOURCE_COLOR[src]}">${TERRAIN_SOURCE_LABEL[src]}</div>
+      </div>
+    `;
+    }).join('');
+
+    const statsLine = terrainStats
+      ? `<div class="tender-meta" style="margin-bottom:10px">מתוך ${terrainStats.total} אנטנות בטווח: ${terrainStats.precomputed} עם תבליט+תכסית מוכנים מראש, ${terrainStats.live} חושבו עכשיו, ${terrainStats.fallback} הערכת מרחק בלבד</div>`
+      : '';
+
+    content.innerHTML = `
+      <div class="tender-title">🏆 מכרז ספקים</div>
+      <div class="tender-subtitle">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} · טווח חיפוש ${(tender.searchRadius / 1000).toFixed(0)} ק"מ</div>
+      ${statsLine}
+      ${rows}
+      <div class="tender-disclaimer">⚠️ הערכה יחסית להשוואה בין מפעילים בלבד, לא מדידת עוצמת שדה אמיתית. מבוססת על תבליט (קו-ראייה), תכסית (יער/עירוני/מים) כשזמינים, דור רשת, והספק תיאורטי (אם ידוע במאגר). כשיש כמה אנטנות של אותו מפעיל בטווח - הציון משקף את הטובה מביניהן.</div>
+    `;
+  }
+
+  document.getElementById('infoSheet').classList.remove('hidden');
+}
+
+async function runTenderAt(lat, lon) {
+  if (tenderMarker) map.removeLayer(tenderMarker);
+  tenderMarker = L.marker([lat, lon], {
+    icon: L.divIcon({
+      className: '',
+      html: `<div style="font-size:26px;line-height:1">📍</div>`,
+      iconSize: [26, 26],
+      iconAnchor: [13, 26],
+    }),
+  }).addTo(map);
+
+  if (!allAntennas.length) {
+    document.getElementById('infoSheetContent').innerHTML = '<div class="tender-empty">הנתונים עדיין נטענים, נסה שוב עוד רגע</div>';
+    document.getElementById('infoSheet').classList.remove('hidden');
+    return;
+  }
+
+  document.getElementById('infoSheetContent').innerHTML = '<div class="tender-empty">⏳ בודק תבליט ותכסית לאנטנות בטווח...</div>';
+  document.getElementById('infoSheet').classList.remove('hidden');
+
+  const tender = await OperatorTender.runTender(lat, lon, allAntennas, coverageRadiusFor);
+  renderTenderResults(tender);
+}
 
 function openReportForm(latlng) {
   const html = `
@@ -241,6 +336,7 @@ function renderReportsList() {
 
 function setReportMode(on) {
   reportMode = on;
+  if (on && tenderMode) setTenderMode(false);
   const btn = document.getElementById('reportModeBtn');
   btn.classList.toggle('active', on);
   btn.textContent = on ? '❌ בטל מצב דיווח (לחץ על המפה)' : '📍 סמן נקודת קליטה חלשה על המפה';
@@ -551,6 +647,13 @@ function wireReportsAndSaved() {
   });
 }
 
+function wireTender() {
+  document.getElementById('tenderModeBtn').addEventListener('click', () => setTenderMode(!tenderMode));
+  document.getElementById('infoSheetClose').addEventListener('click', () => {
+    document.getElementById('infoSheet').classList.add('hidden');
+  });
+}
+
 function wireOfflineBadge() {
   const badge = document.getElementById('offlineBadge');
   const update = () => badge.classList.toggle('hidden', navigator.onLine);
@@ -608,14 +711,23 @@ function wireSearch() {
     results.forEach(r => {
       const item = document.createElement('div');
       item.className = 'search-item';
-      item.textContent = r.label;
       item.title = r.fullLabel || r.label;
-      item.addEventListener('click', () => {
+      item.innerHTML = `<span class="search-item-label">${r.label}</span><button class="search-item-tender" title="בדוק מכרז ספקים כאן">🏆</button>`;
+      item.querySelector('.search-item-label').addEventListener('click', () => {
         map.setView([r.lat, r.lon], 16);
         resultsBox.classList.add('hidden');
         input.value = r.label;
         document.getElementById('sidePanel').classList.remove('open');
         document.getElementById('sideOverlay').classList.remove('open');
+      });
+      item.querySelector('.search-item-tender').addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        map.setView([r.lat, r.lon], 16);
+        resultsBox.classList.add('hidden');
+        input.value = r.label;
+        document.getElementById('sidePanel').classList.remove('open');
+        document.getElementById('sideOverlay').classList.remove('open');
+        runTenderAt(r.lat, r.lon);
       });
       resultsBox.appendChild(item);
     });
@@ -655,6 +767,7 @@ async function boot() {
   wireSearch();
   wireMisc();
   wireReportsAndSaved();
+  wireTender();
   wireOfflineBadge();
   renderSavedAddresses();
   renderReports();

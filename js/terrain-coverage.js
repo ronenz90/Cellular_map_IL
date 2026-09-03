@@ -91,6 +91,36 @@ const TerrainCoverage = (() => {
     return polygon;
   }
 
+  function initialBearing(lat1, lon1, lat2, lon2) {
+    const φ1 = toRad(lat1), φ2 = toRad(lat2), Δλ = toRad(lon2 - lon1);
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+
+  function rayEdgeDistance(ray, baseRadius) {
+    const raw = ray.blocked ? ray.losDistance : Math.min(baseRadius, PRECOMPUTE_MAX_DIST);
+    return raw * (CLUTTER_FACTOR[ray.clutterCategory] || 1.0);
+  }
+
+  /**
+   * נותן את "מרחק הגבול" המשוער של ענן הכיסוי בכיוון מדויק (לא רק אחד
+   * מ-16 הזוויות שנבדקו) - באמצעות אינטרפולציה לינארית בין שתי הקרניים
+   * הסמוכות. משמש את "מכרז ספקים" כדי לדעת אם נקודה ספציפית בתוך
+   * הכיסוי המשוער של אנטנה, בכיוון המדויק שלה מהאנטנה - לא רק לפי
+   * רדיוס גנרי.
+   */
+  function boundaryDistanceAtBearing(rays, bearingDeg, baseRadius) {
+    const n = rays.length;
+    const step = 360 / n;
+    const idx = Math.floor(bearingDeg / step) % n;
+    const idx2 = (idx + 1) % n;
+    const r1 = rayEdgeDistance(rays[idx], baseRadius);
+    const r2 = rayEdgeDistance(rays[idx2], baseRadius);
+    const frac = (bearingDeg - idx * step) / step;
+    return r1 + (r2 - r1) * frac;
+  }
+
   async function fetchElevations(points) {
     // opentopodata: עד 100 נקודות לבקשה, GET עם locations=lat,lon|lat,lon...
     const elevations = new Array(points.length).fill(null);
@@ -298,14 +328,19 @@ const TerrainCoverage = (() => {
       const startIdx = raySampleIndices[r];
       let edgeDist = maxDist;
       let blocked = false;
+      // גובה הקרקע בקצה הקרן (הדגימה הרחוקה ביותר) - משמש כבסיס לגובה
+      // המקלט היעד. לפני התיקון הונח בטעות שהיעד בגובה ים (0), מה שגרם
+      // לחסימות-שווא נרחבות בכל אזור עם גובה קרקע משמעותי מעל האנטנה.
+      const farGroundElev = elevations[startIdx + SAMPLES_PER_RAY] || 0;
+      const receiverAbsHeight = farGroundElev + RECEIVER_HEIGHT;
 
       for (let s = 0; s < SAMPLES_PER_RAY; s++) {
         const globalIdx = startIdx + s + 1; // +1 כי אינדקס 0 הוא נקודת האנטנה עצמה
         const [, , dist] = rayPoints[startIdx + s];
         const groundElev = elevations[globalIdx] || 0;
 
-        // קו-ראייה: גובה הקו הישר מהאנטנה למקלט בנקודה הזו
-        const losHeight = antennaTotalHeight + (RECEIVER_HEIGHT - antennaTotalHeight) * (dist / maxDist);
+        // קו-ראייה: גובה הקו הישר מהאנטנה עד לגובה המקלט בקצה הקרן (לא בגובה ים!)
+        const losHeight = antennaTotalHeight + (receiverAbsHeight - antennaTotalHeight) * (dist / maxDist);
         // תיקון עקמומיות כדור הארץ (מקטין את קו הראייה הזמין ככל שמתרחקים)
         const earthCurveDrop = (dist * (maxDist - dist)) / (2 * K_FACTOR * R_EARTH);
         const effectiveLos = losHeight - earthCurveDrop;
@@ -335,5 +370,26 @@ const TerrainCoverage = (() => {
     return result;
   }
 
-  return { computeCoverage };
+  return {
+    computeCoverage,
+    // חשיפת פרימיטיבים לשימוש חוזר במודולים אחרים (כרגע: operator-tender.js
+    // עבור "מכרז ספקים" מודע-תבליט) - נמנעים מכפילות קוד
+    loadLandcoverIndex,
+    clutterPolygonsFromIndex,
+    pointInPolygon,
+    clutterAt,
+    fetchElevations,
+    fetchPrecomputed,
+    antennaKey,
+    destinationPoint,
+    initialBearing,
+    boundaryDistanceAtBearing,
+    rayEdgeDistance,
+    CLUTTER_FACTOR,
+    PRECOMPUTE_MAX_DIST,
+    RECEIVER_HEIGHT,
+    ANTENNA_HEIGHT,
+    K_FACTOR,
+    R_EARTH,
+  };
 })();
