@@ -103,7 +103,14 @@ body{
   font-size:13.5px;
   cursor:pointer;
   border-bottom:1px solid var(--panel-border);
+  display:flex;align-items:center;gap:8px;justify-content:space-between;
 }
+.search-item-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.search-item-tender{
+  flex:0 0 auto;background:transparent;border:1px solid var(--panel-border);border-radius:6px;
+  font-size:13px;padding:3px 6px;cursor:pointer;
+}
+.search-item-tender:hover{background:rgba(255,255,255,0.08);}
 .search-item:last-child{border-bottom:none;}
 .search-item:hover{background:rgba(255,255,255,0.06);}
 .search-empty{padding:12px;color:var(--text-dim);font-size:13px;}
@@ -317,11 +324,45 @@ body{
   padding:10px 18px calc(18px + var(--safe-bottom));
   z-index:1500;
   box-shadow:0 -10px 30px rgba(0,0,0,.4);
+  max-height:70vh;
+  overflow-y:auto;
 }
 .sheet-handle{
   width:40px;height:4px;background:#374151;border-radius:2px;
   margin:0 auto 10px;
 }
+.sheet-close{
+  position:absolute;top:10px;left:14px;
+  background:none;border:none;color:var(--text-dim);font-size:16px;cursor:pointer;
+}
+
+/* ---------- מכרז ספקים ---------- */
+.tender-title{font-size:15px;font-weight:700;margin-bottom:2px;}
+.tender-subtitle{font-size:11.5px;color:var(--text-dim);margin-bottom:14px;}
+.tender-row{
+  background:#1e293b;border-radius:10px;padding:10px 12px;margin-bottom:8px;
+  border:1px solid transparent;
+}
+.tender-row.winner{border-color:#34d399;background:#16281f;}
+.tender-row-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.tender-rank{font-weight:700;font-size:13px;}
+.tender-op-name{font-weight:700;font-size:14px;flex:1;}
+.tender-score{font-size:13px;font-weight:700;color:var(--accent);}
+.tender-bar-bg{height:6px;background:#0f172a;border-radius:4px;margin:6px 0;overflow:hidden;}
+.tender-bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#38bdf8,#34d399);}
+.tender-meta{font-size:11.5px;color:var(--text-dim);}
+.tender-gen-breakdown{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+.tender-gen-chip{
+  font-size:10.5px;padding:3px 7px;border-radius:999px;background:#0f172a;color:var(--text-dim);
+  border:1px solid var(--panel-border);
+}
+.tender-los-btn{
+  margin-top:8px;font-size:11px;background:transparent;border:1px solid var(--panel-border);
+  color:var(--text-dim);padding:4px 8px;border-radius:6px;cursor:pointer;
+}
+.tender-los-status{font-size:11px;margin-top:6px;}
+.tender-empty{font-size:12.5px;color:var(--text-dim);text-align:center;padding:20px 0;}
+.tender-disclaimer{font-size:11px;color:var(--text-dim);margin-top:14px;line-height:1.5;}
 
 /* ================= Mobile ================= */
 @media (max-width: 860px){
