@@ -120,14 +120,20 @@ const OperatorTender = (() => {
   }
 
   /**
-   * מריץ את ה"מכרז" בנקודה נתונה - מודע תבליט+תכסית.
+   * מריץ את ה"מכרז" בנקודה נתונה - מודע תבליט+תכסית, עם עדכון "חי":
+   * במקום לחכות לכל התוצאות ורק אז להציג, קוראים ל-onProgress בכל
+   * שלב עם התוצאה הטובה ביותר הידועה כרגע - כך שהמשתמש רואה את
+   * הדירוג מתעדן מול העיניים (הערכה גסה מיידית -> כל אנטנה עם קובץ
+   * precomputed מתעדכנת בנפרד ברגע שהיא מגיעה -> קבוצת האנטנות
+   * החסרות מתעדכנת יחד בסוף אחרי חישוב חי).
    * @param {number} lat, lon - הנקודה
    * @param {Array} allAntennas
    * @param {(antenna) => number} getBaseRadius - פונקציה שמחזירה את
    *   הרדיוס הבסיסי (כולל התאמת צפיפות+הספק) לאנטנה - מ-app.js
    *   coverageRadiusFor, כדי לא לשכפל את הלוגיקה הזו כאן
+   * @param {(tender) => void} [onProgress] - נקרא בכל פעם שיש עדכון
    */
-  async function runTender(lat, lon, allAntennas, getBaseRadius) {
+  async function runTender(lat, lon, allAntennas, getBaseRadius, onProgress) {
     const candidates = [];
     for (const a of allAntennas) {
       const d = distMeters(lat, lon, a.lat, a.lon);
@@ -136,77 +142,97 @@ const OperatorTender = (() => {
         antenna: a,
         distance: d,
         bearing: TerrainCoverage.initialBearing(a.lat, a.lon, lat, lon),
+        terrainSource: 'pending',
       });
     }
 
-    if (!candidates.length) {
-      return { point: { lat, lon }, results: [], searchRadius: SEARCH_RADIUS_M, terrainStats: { precomputed: 0, live: 0, fallback: 0 } };
+    function computeStats() {
+      return {
+        precomputed: candidates.filter(c => c.terrainSource === 'precomputed').length,
+        live: candidates.filter(c => c.terrainSource === 'live').length,
+        fallback: candidates.filter(c => c.terrainSource === 'fallback').length,
+        pending: candidates.filter(c => c.terrainSource === 'pending').length,
+        total: candidates.length,
+      };
     }
 
-    // שלב 1: מנסים למשוך precomputed לכל המועמדים במקביל
-    const precomputedList = await Promise.all(candidates.map(c => TerrainCoverage.fetchPrecomputed(c.antenna)));
-    const missing = [];
-    candidates.forEach((c, i) => {
-      if (precomputedList[i] && precomputedList[i].rays) {
-        c.rays = precomputedList[i].rays;
-        c.terrainSource = 'precomputed';
-      } else {
-        missing.push(c);
-      }
-    });
-
-    // שלב 2: לאלה שאין להם - קרן חד-כיוונית חיה, ב-batch אחד
-    if (missing.length) {
-      await fillLiveBoundaries(missing, lat, lon);
-    }
-
-    // שלב 3: חישוב מרחק-גבול וציון סופי לכל מועמד
-    for (const c of candidates) {
+    function scoreCandidate(c) {
       const baseRadius = getBaseRadius(c.antenna);
       if (c.rays) {
         c.boundaryDist = TerrainCoverage.boundaryDistanceAtBearing(c.rays, c.bearing, baseRadius);
       } else if (c.liveRay) {
         c.boundaryDist = TerrainCoverage.rayEdgeDistance(c.liveRay, baseRadius);
       } else {
-        c.boundaryDist = baseRadius; // fallback גנרי - אין נתוני תבליט זמינים (למשל שגיאת רשת)
-        c.terrainSource = 'fallback';
+        c.boundaryDist = baseRadius; // הערכה ראשונית/fallback - עוד לפני (או בלי) נתוני תבליט
       }
       c.score = 100 / (1 + Math.pow(c.distance / c.boundaryDist, 2));
     }
 
-    // שלב 4: איגוד לפי מפעיל+דור רשת - "מחבר" כמה אנטנות (הציון הטוב ביותר מנצח)
-    const byOperator = new Map();
-    for (const c of candidates) {
-      const op = c.antenna.props.operator || 'לא ידוע';
-      const gen = c.antenna.props.generation;
-      if (!byOperator.has(op)) {
-        byOperator.set(op, { operator: op, bestScore: -1, bestDistance: null, bestGeneration: null, antennaCount: 0, byGeneration: {} });
+    function aggregate() {
+      const byOperator = new Map();
+      for (const c of candidates) {
+        const op = c.antenna.props.operator || 'לא ידוע';
+        const gen = c.antenna.props.generation;
+        if (!byOperator.has(op)) {
+          byOperator.set(op, { operator: op, bestScore: -1, bestDistance: null, bestGeneration: null, antennaCount: 0, byGeneration: {} });
+        }
+        const entry = byOperator.get(op);
+        entry.antennaCount++;
+        if (!entry.byGeneration[gen] || c.score > entry.byGeneration[gen].score) {
+          entry.byGeneration[gen] = { score: c.score, distance: c.distance, antenna: c.antenna, terrainSource: c.terrainSource, boundaryDist: c.boundaryDist };
+        }
+        if (c.score > entry.bestScore) {
+          entry.bestScore = c.score;
+          entry.bestDistance = c.distance;
+          entry.bestGeneration = gen;
+          entry.bestAntenna = c.antenna;
+          entry.bestTerrainSource = c.terrainSource;
+          entry.bestBoundaryDist = c.boundaryDist;
+        }
       }
-      const entry = byOperator.get(op);
-      entry.antennaCount++;
+      return [...byOperator.values()].sort((a, b) => b.bestScore - a.bestScore);
+    }
 
-      if (!entry.byGeneration[gen] || c.score > entry.byGeneration[gen].score) {
-        entry.byGeneration[gen] = { score: c.score, distance: c.distance, antenna: c.antenna, terrainSource: c.terrainSource, boundaryDist: c.boundaryDist };
+    function emit(pending) {
+      const snapshot = { point: { lat, lon }, results: aggregate(), searchRadius: SEARCH_RADIUS_M, terrainStats: computeStats(), pending };
+      if (onProgress) onProgress(snapshot);
+      return snapshot;
+    }
+
+    if (!candidates.length) {
+      return emit(false);
+    }
+
+    // שידור ראשוני מיידי: הערכה גסה לפי רדיוס בסיס בלבד (עוד לפני
+    // תבליט/תכסית) - כדי שהמשתמש יראה תוצאה תוך כדי טעינה, לא מסך ריק
+    candidates.forEach(scoreCandidate);
+    emit(true);
+
+    // שלב 1: כל מועמד מושך precomputed בנפרד ומשדר עדכון ברגע שהוא
+    // מגיע (לא מחכים לכולם יחד ב-Promise.all לפני שמשדרים) - זה מה
+    // שנותן תחושת "חי" אמיתית, לא רק ספינר ואז קפיצה לתוצאה סופית
+    await Promise.all(candidates.map(async (c) => {
+      const pre = await TerrainCoverage.fetchPrecomputed(c.antenna);
+      if (pre && pre.rays && pre.rays.length) {
+        c.rays = pre.rays;
+        c.terrainSource = 'precomputed';
+        scoreCandidate(c);
+        emit(true);
       }
-      if (c.score > entry.bestScore) {
-        entry.bestScore = c.score;
-        entry.bestDistance = c.distance;
-        entry.bestGeneration = gen;
-        entry.bestAntenna = c.antenna;
-        entry.bestTerrainSource = c.terrainSource;
-        entry.bestBoundaryDist = c.boundaryDist;
+    }));
+
+    // שלב 2: לאלה שנשארו בלי precomputed - קרן חד-כיוונית חיה, ב-batch
+    // משותף אחד (חוסך הרבה קריאות רשת נפרדות)
+    const missing = candidates.filter(c => c.terrainSource === 'pending');
+    if (missing.length) {
+      await fillLiveBoundaries(missing, lat, lon);
+      for (const c of missing) {
+        c.terrainSource = c.liveRay ? 'live' : 'fallback';
+        scoreCandidate(c);
       }
     }
 
-    const results = [...byOperator.values()].sort((a, b) => b.bestScore - a.bestScore);
-    const terrainStats = {
-      precomputed: candidates.filter(c => c.terrainSource === 'precomputed').length,
-      live: candidates.filter(c => c.terrainSource === 'live').length,
-      fallback: candidates.filter(c => c.terrainSource === 'fallback').length,
-      total: candidates.length,
-    };
-
-    return { point: { lat, lon }, results, searchRadius: SEARCH_RADIUS_M, terrainStats };
+    return emit(false);
   }
 
   return { runTender, distMeters };

@@ -197,14 +197,16 @@ const TERRAIN_SOURCE_LABEL = {
   precomputed: '✓ מבוסס תבליט+תכסית (מוכן מראש)',
   live: '✓ מבוסס תבליט (חושב עכשיו)',
   fallback: '⚠️ הערכת מרחק בלבד (אין נתוני תבליט זמינים)',
+  pending: '⏳ בודק תבליט ותכסית...',
 };
-const TERRAIN_SOURCE_COLOR = { precomputed: '#34d399', live: '#38bdf8', fallback: '#fbbf24' };
+const TERRAIN_SOURCE_COLOR = { precomputed: '#34d399', live: '#38bdf8', fallback: '#fbbf24', pending: '#9ca3af' };
 
 function renderTenderResults(tender) {
   const content = document.getElementById('infoSheetContent');
-  const { results, point, terrainStats } = tender;
+  const { results, point, terrainStats, pending } = tender;
 
   if (!results.length) {
+    if (pending) return; // עוד אין שום מועמד לדווח עליו - נשארים על מסך הטעינה
     content.innerHTML = `
       <div class="tender-title">🏆 מכרז ספקים</div>
       <div class="tender-subtitle">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}</div>
@@ -212,7 +214,7 @@ function renderTenderResults(tender) {
     `;
   } else {
     const rows = results.map((r, i) => {
-      const src = r.bestTerrainSource || 'fallback';
+      const src = r.bestTerrainSource || 'pending';
       return `
       <div class="tender-row ${i === 0 ? 'winner' : ''}">
         <div class="tender-row-head">
@@ -228,13 +230,17 @@ function renderTenderResults(tender) {
     `;
     }).join('');
 
-    const statsLine = terrainStats
+    const liveNote = pending
+      ? `<div class="tender-meta" style="margin-bottom:10px;color:#38bdf8">🔄 מדייק תוצאות בזמן אמת... (${terrainStats.precomputed + terrainStats.live + terrainStats.fallback}/${terrainStats.total} אנטנות נבדקו)</div>`
+      : '';
+    const statsLine = (terrainStats && !pending)
       ? `<div class="tender-meta" style="margin-bottom:10px">מתוך ${terrainStats.total} אנטנות בטווח: ${terrainStats.precomputed} עם תבליט+תכסית מוכנים מראש, ${terrainStats.live} חושבו עכשיו, ${terrainStats.fallback} הערכת מרחק בלבד</div>`
       : '';
 
     content.innerHTML = `
       <div class="tender-title">🏆 מכרז ספקים</div>
       <div class="tender-subtitle">${point.lat.toFixed(5)}, ${point.lon.toFixed(5)} · טווח חיפוש ${(tender.searchRadius / 1000).toFixed(0)} ק"מ</div>
+      ${liveNote}
       ${statsLine}
       ${rows}
       <div class="tender-disclaimer">⚠️ הערכה יחסית להשוואה בין מפעילים בלבד, לא מדידת עוצמת שדה אמיתית. מבוססת על תבליט (קו-ראייה), תכסית (יער/עירוני/מים) כשזמינים, דור רשת, והספק תיאורטי (אם ידוע במאגר). כשיש כמה אנטנות של אותו מפעיל בטווח - הציון משקף את הטובה מביניהן.</div>
@@ -242,6 +248,21 @@ function renderTenderResults(tender) {
   }
 
   document.getElementById('infoSheet').classList.remove('hidden');
+}
+
+// עוטפים את הרינדור ב-throttle קל: אם יש הרבה אנטנות בטווח (אזור
+// עירוני צפוף) ועדכונים מגיעים מהר מאוד זה אחרי זה, לא בונים מחדש את
+// כל ה-DOM על כל עדכון בודד (מרצד) - מגבילים לכל היותר לעדכון אחד
+// כל ~120ms, אבל תמיד מבטיחים שהעדכון האחרון (הסופי) יוצג.
+let tenderRenderTimer = null;
+let tenderLatestSnapshot = null;
+function scheduleTenderRender(snapshot) {
+  tenderLatestSnapshot = snapshot;
+  if (tenderRenderTimer) return;
+  tenderRenderTimer = setTimeout(() => {
+    tenderRenderTimer = null;
+    renderTenderResults(tenderLatestSnapshot);
+  }, 120);
 }
 
 async function runTenderAt(lat, lon) {
@@ -261,11 +282,12 @@ async function runTenderAt(lat, lon) {
     return;
   }
 
-  document.getElementById('infoSheetContent').innerHTML = '<div class="tender-empty">⏳ בודק תבליט ותכסית לאנטנות בטווח...</div>';
+  document.getElementById('infoSheetContent').innerHTML = '<div class="tender-empty">⏳ מוצא אנטנות בטווח...</div>';
   document.getElementById('infoSheet').classList.remove('hidden');
 
-  const tender = await OperatorTender.runTender(lat, lon, allAntennas, coverageRadiusFor);
-  renderTenderResults(tender);
+  await OperatorTender.runTender(lat, lon, allAntennas, coverageRadiusFor, scheduleTenderRender);
+  // ה-await מסתיים אחרי שכל השלבים הושלמו, אבל תוצאות הביניים כבר
+  // הוצגו בדרך דרך scheduleTenderRender - אין צורך ברינדור נוסף כאן
 }
 
 function openReportForm(latlng) {
@@ -746,16 +768,48 @@ function wireSearch() {
 
 function wireMisc() {
   document.getElementById('fitIsraelBtn').addEventListener('click', () => map.fitBounds(ISRAEL_BOUNDS));
-  document.getElementById('locateBtn').addEventListener('click', () => {
-    if (!navigator.geolocation) return;
+  document.getElementById('locateBtn').addEventListener('click', async () => {
+    const onSuccess = (lat, lon) => {
+      map.setView([lat, lon], 15);
+      L.circleMarker([lat, lon], { radius: 7, color: '#38bdf8', fillColor: '#38bdf8', fillOpacity: 0.8 }).addTo(map);
+    };
+
+    const onError = (err) => {
+      console.error('geolocation error', err);
+      let msg = 'לא ניתן היה לקבל את המיקום שלך.';
+      const code = err && err.code;
+      if (code === 1) msg += ' ההרשאה נדחתה - בדוק בהגדרות הדפדפן/האפליקציה שהרשאת המיקום מאושרת עבור האתר/האפליקציה הזו.';
+      else if (code === 2) msg += ' המיקום לא זמין כרגע (נסה לוודא ש-GPS/מיקום מופעל במכשיר, או לצאת לשטח פתוח).';
+      else if (code === 3) msg += ' הבקשה נכשלה עקב פסק זמן - נסה שוב, לפעמים לוקח כמה שניות למכשיר "לתפוס" מיקום בפעם הראשונה.';
+      alert(msg);
+    };
+
+    // באפליקציית האנדרואיד (Capacitor) - navigator.geolocation הרגיל של
+    // הדפדפן לא תמיד עובד באמינות בתוך WebView בלי הרשאות אנדרואיד
+    // שנרשמות ע"י פלאגין Capacitor ייעודי. אם הפלאגין @capacitor/geolocation
+    // מותקן וזמין (ראו package.json), עדיף להשתמש בו; אחרת נופלים
+    // ל-navigator.geolocation הרגיל (מספיק טוב בדפדפן/PWA).
+    try {
+      if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation) {
+        const pos = await window.Capacitor.Plugins.Geolocation.getCurrentPosition({
+          enableHighAccuracy: true, timeout: 15000,
+        });
+        onSuccess(pos.coords.latitude, pos.coords.longitude);
+        return;
+      }
+    } catch (err) {
+      onError(err);
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      alert('הדפדפן הזה לא תומך באיתור מיקום.');
+      return;
+    }
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        map.setView([latitude, longitude], 15);
-        L.circleMarker([latitude, longitude], { radius: 7, color: '#38bdf8', fillColor: '#38bdf8', fillOpacity: 0.8 }).addTo(map);
-      },
-      () => alert('לא ניתן היה לקבל את המיקום שלך'),
-      { enableHighAccuracy: true, timeout: 8000 }
+      (pos) => onSuccess(pos.coords.latitude, pos.coords.longitude),
+      onError,
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
     );
   });
 }
