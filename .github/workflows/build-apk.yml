@@ -70,25 +70,28 @@ jobs:
           name: antenna-map-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
 
-      - name: הכנת zip של פרויקט Android Studio העצמאי
+      - name: ניקוי תיקיות build/cache כבדות מהפרויקט
         # מאפשר לפתוח את הפרויקט ישירות ב-Android Studio (או בכלים
         # חיצוניים לבניית APK) ולבנות/לחתום APK משלכם, בלי תלות ב-CI.
         # מנקים תיקיות build/cache כבדות שנוצרות מחדש אוטומטית בפתיחה
-        # הראשונה. חשוב: הארכיון ארוז כך ש-build.gradle ותיקיית app/
-        # נמצאים **בשורש** ה-zip עצמו (לא בתוך תיקיית android/ מקוננת) -
-        # זו הציפייה הסטנדרטית הן של Android Studio (פותחים תיקייה עם
-        # settings.gradle בשורש) והן של כלי בנייה חיצוניים.
+        # הראשונה.
+        #
+        # חשוב - למה *לא* יוצרים zip בעצמנו כאן: actions/upload-artifact
+        # תמיד עוטף את מה שמעלים ב-zip נוסף בזמן ההורדה מהאתר. אם
+        # מעלים zip שכבר יצרנו, ה-zip שמתקבל בהורדה מכיל בתוכו את ה-zip
+        # שלנו כקובץ בודד (zip-בתוך-zip) - בדיוק מה שגרם ל"Invalid
+        # Android project" בכלי החיצוני (הוא ראה קובץ zip יחיד, לא
+        # build.gradle/app/ בשורש). הפתרון: מעלים את *התיקייה* עצמה
+        # כ-artifact - כשמעלים תיקייה בודדת, ה-zip שנוצר בהורדה מכיל
+        # את התוכן שלה ישירות בשורש, בלי עטיפה נוספת.
         run: |
           rm -rf android/app/build android/.gradle android/build android/.idea
           rm -f android/local.properties  # נתיב SDK ספציפי ל-runner, Android Studio ייצור מחדש
-          cd android
-          zip -r ../android-studio-project.zip . -x ".git/*"
-          cd ..
-          echo "--- תוכן שורש ה-zip (לוודא build.gradle ו-app/ בשורש) ---"
-          unzip -l android-studio-project.zip | head -20
+          echo "--- תוכן תיקיית android/ שתועלה (לוודא build.gradle ו-app/ קיימים) ---"
+          ls -la android/
 
       - name: העלאת פרויקט Android Studio כ-artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-studio-project
-          path: android-studio-project.zip
+          path: android
