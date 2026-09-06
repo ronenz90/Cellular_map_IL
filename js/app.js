@@ -190,6 +190,7 @@ let tenderMarker = null;
 function setTenderMode(on) {
   tenderMode = on;
   if (on && reportMode) setReportMode(false);
+  if (on) closeSidePanel(); // אחרת בנייד הפאנל/ה-overlay חוסמים את הקליק על המפה
   const btn = document.getElementById('tenderModeBtn');
   btn.classList.toggle('active', on);
   btn.textContent = on ? '❌ בטל מצב סיכה' : '📍 נעץ/הזז סיכה על המפה';
@@ -389,7 +390,7 @@ function renderTenderFilterBar(lat, lon, currentlySelected) {
   bar.classList.remove('hidden');
   bar.querySelector('#tenderRerunBtn').addEventListener('click', () => {
     const chosen = new Set([...bar.querySelectorAll('input:checked')].map(i => i.value));
-    if (!chosen.size) { alert('צריך לבחור לפחות דור רשת אחד'); return; }
+    if (!chosen.size) { showTransientBanner('צריך לבחור לפחות דור רשת אחד', true, 4000); return; }
     runTenderAt(lat, lon, chosen);
   });
 }
@@ -466,6 +467,7 @@ function renderReportsList() {
 function setReportMode(on) {
   reportMode = on;
   if (on && tenderMode) setTenderMode(false);
+  if (on) closeSidePanel(); // אחרת בנייד הפאנל/ה-overlay חוסמים את הקליק על המפה
   const btn = document.getElementById('reportModeBtn');
   btn.classList.toggle('active', on);
   btn.textContent = on ? '❌ בטל מצב דיווח (לחץ על המפה)' : '📍 סמן נקודת קליטה חלשה על המפה';
@@ -786,7 +788,7 @@ function wireTender() {
   document.getElementById('tenderModeBtn').addEventListener('click', () => setTenderMode(!tenderMode));
   document.getElementById('tenderRunPinBtn').addEventListener('click', () => {
     if (!tenderMarker) {
-      alert('אין עדיין סיכה על המפה - נעץ סיכה קודם (לחצו "נעץ/הזז סיכה" ואז על המפה)');
+      showTransientBanner('אין עדיין סיכה על המפה - נעץ סיכה קודם (לחצו "נעץ/הזז סיכה" ואז על המפה)', true, 6000);
       return;
     }
     const p = tenderMarker.getLatLng();
@@ -824,14 +826,18 @@ async function loadPrecomputeStatus() {
   }
 }
 
+function closeSidePanel() {
+  document.getElementById('sidePanel').classList.remove('open');
+  document.getElementById('sideOverlay').classList.remove('open');
+}
+
 function wireSidePanel() {
   const panel = document.getElementById('sidePanel');
   const overlay = document.getElementById('sideOverlay');
   const toggle = document.getElementById('menuToggle');
   const open = () => { panel.classList.add('open'); overlay.classList.add('open'); };
-  const close = () => { panel.classList.remove('open'); overlay.classList.remove('open'); };
-  toggle.addEventListener('click', () => panel.classList.contains('open') ? close() : open());
-  overlay.addEventListener('click', close);
+  toggle.addEventListener('click', () => panel.classList.contains('open') ? closeSidePanel() : open());
+  overlay.addEventListener('click', closeSidePanel);
 }
 
 function wireSearch() {
@@ -887,6 +893,16 @@ function wireSearch() {
   });
 }
 
+function showTransientBanner(msg, isError, durationMs) {
+  const banner = document.getElementById('errorBanner');
+  banner.textContent = msg;
+  banner.style.borderColor = isError ? '' : '#38bdf8';
+  banner.style.color = isError ? '' : '#e5e7eb';
+  banner.classList.remove('hidden');
+  clearTimeout(banner._hideTimer);
+  banner._hideTimer = setTimeout(() => banner.classList.add('hidden'), durationMs || 6000);
+}
+
 function wireMisc() {
   document.getElementById('fitIsraelBtn').addEventListener('click', () => map.fitBounds(ISRAEL_BOUNDS));
   document.getElementById('locateBtn').addEventListener('click', async () => {
@@ -895,6 +911,7 @@ function wireMisc() {
     const onSuccess = (lat, lon) => {
       map.setView([lat, lon], 15);
       L.circleMarker([lat, lon], { radius: 7, color: '#38bdf8', fillColor: '#38bdf8', fillOpacity: 0.8 }).addTo(map);
+      showTransientBanner('📍 המיקום שלך נמצא', false, 2500);
     };
 
     const onError = (err) => {
@@ -904,7 +921,10 @@ function wireMisc() {
       if (code === 1) msg += ' ההרשאה נדחתה - בדוק בהגדרות הדפדפן/האפליקציה שהרשאת המיקום מאושרת עבור האתר/האפליקציה הזו.';
       else if (code === 2) msg += ' המיקום לא זמין כרגע (נסה לוודא ש-GPS/מיקום מופעל במכשיר, או לצאת לשטח פתוח).';
       else if (code === 3) msg += ' הבקשה נכשלה עקב פסק זמן - נסה שוב, לפעמים לוקח כמה שניות למכשיר "לתפוס" מיקום בפעם הראשונה.';
-      alert(msg);
+      else if (err && err.message) msg += ' (' + err.message + ')';
+      // באנר גלוי במקום alert() - בחלק מה-WebView-ים של אפליקציות מותקנות
+      // alert() לא תמיד מוצג באמינות, ואז המשתמש חושב "שלא קרה כלום"
+      showTransientBanner(msg, true, 9000);
     };
 
     // באפליקציית האנדרואיד (Capacitor) - navigator.geolocation הרגיל של
@@ -939,7 +959,7 @@ function wireMisc() {
     }
 
     if (!navigator.geolocation) {
-      alert('הדפדפן הזה לא תומך באיתור מיקום.');
+      showTransientBanner('הדפדפן הזה לא תומך באיתור מיקום.', true, 6000);
       return;
     }
     navigator.geolocation.getCurrentPosition(
