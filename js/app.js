@@ -170,6 +170,16 @@ function initMap() {
     if (reportMode) { openReportForm(e.latlng); return; }
     if (tenderMode) { placeTenderPin(e.latlng.lat, e.latlng.lng); return; }
   });
+
+  // אם המשתמש לוחץ ישירות על אנטנה/אשכול בזמן מצב-סיכה - גם זה אמור
+  // לנעוץ את הסיכה (לא לפתוח את הפופ-אפ של האנטנה או לזום לתוך
+  // האשכול), אחרת חלק ניכר מהמפה "בולע" קליקים בלי לנעוץ שום דבר
+  clusterGroup.on('click', (e) => {
+    if (tenderMode) { L.DomEvent.stop(e); placeTenderPin(e.latlng.lat, e.latlng.lng); }
+  });
+  clusterGroup.on('clusterclick', (e) => {
+    if (tenderMode) { placeTenderPin(e.latlng.lat, e.latlng.lng); }
+  });
 }
 
 /* ================= מכרז ספקים + סיכה חופשית ================= */
@@ -428,6 +438,9 @@ function renderReports() {
       ${r.note ? `<div class="popup-row">${r.note}</div>` : ''}
       <div class="popup-row" style="color:#6b7280">${new Date(r.createdAt).toLocaleDateString('he-IL')}</div>
     `);
+    marker.on('click', () => {
+      if (tenderMode) placeTenderPin(r.lat, r.lon);
+    });
     reportsLayer.addLayer(marker);
   }
   renderReportsList();
@@ -632,6 +645,9 @@ function renderAntennas() {
         }),
       });
       marker.bindPopup(() => buildPopup(a));
+      marker.on('click', () => {
+        if (tenderMode) placeTenderPin(a.lat, a.lon);
+      });
       return marker;
     });
     plannedMarkers.forEach(m => plannedLayer.addLayer(m));
@@ -682,6 +698,9 @@ function renderCoverageInViewport() {
     circles.push(L.circle([a.lat, a.lon], {
       radius, color, weight: 1, fillColor: color, fillOpacity: 0.08, opacity: 0.35,
       renderer: canvasRenderer,
+      interactive: false, // חשוב: בלי זה, המעגלים "בולעים" קליקים ומונעים
+                          // מהם להגיע למפה עצמה (שבר, בין השאר, את נעיצת
+                          // הסיכה החופשית - רוב המפה מכוסה במעגלים חופפים)
     }));
   }
   circles.forEach(c => coverageLayer.addLayer(c));
