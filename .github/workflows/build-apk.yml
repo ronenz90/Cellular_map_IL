@@ -71,44 +71,57 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: הפיכת פרויקט Android Studio לעצמאי (vendoring תלויות Capacitor)
-        # settings.gradle שנוצר ע"י cap sync כולל הפניות יחסיות כמו
-        # ../node_modules/@capacitor/android/android - זה עובד בתוך
-        # ה-CI (איפה ש-node_modules קיים כאח של android/), אבל כשמוציאים
-        # רק את תיקיית android/ כארטיפקט עצמאי, ההפניות האלה נשברות
-        # (Gradle: "Could not resolve project :capacitor-android").
-        # הפתרון: מעתיקים את המודולים האלה פיזית לתוך android/ עצמו
-        # (capacitor-libs/) ומשכתבים את settings.gradle להצביע לשם -
-        # כך שהפרויקט המיוצא באמת עצמאי, בלי תלות ב-node_modules חיצוני.
+        # ההפניות היחסיות ל-../node_modules/@capacitor/... לא תמיד יושבות
+        # ב-settings.gradle עצמו - קפסיטור מפריד אותן ל-קובץ נפרד
+        # capacitor.settings.gradle שנטען דרך "apply from:". בודקים את שני
+        # הקבצים (כל מה שקיים מהם) כדי לא לפספס, כי אם מטפלים רק ב-
+        # settings.gradle כשההפניות בפועל ב-capacitor.settings.gradle -
+        # הסקריפט "מצליח" בלי לשנות כלום, וה-node_modules החיצוני עדיין חסר.
         run: |
           python3 - <<'PYEOF'
           import re, shutil, os
 
-          settings_path = "android/settings.gradle"
-          with open(settings_path, encoding="utf-8") as f:
-              content = f.read()
-
+          candidate_files = ["android/settings.gradle", "android/capacitor.settings.gradle"]
           pattern = re.compile(r"project\(':([\w-]+)'\)\.projectDir\s*=\s*new File\('([^']+)'\)")
           vendor_root = "android/capacitor-libs"
           os.makedirs(vendor_root, exist_ok=True)
+          total_replacements = 0
 
-          def replace(match):
-              name, rel_path = match.group(1), match.group(2)
-              if "node_modules" not in rel_path:
-                  return match.group(0)  # כבר עצמאי (למשל capacitor-cordova-android-plugins) - לא נוגעים
-              src = os.path.normpath(os.path.join("android", rel_path))
-              dst = os.path.join(vendor_root, name)
-              if os.path.isdir(src) and not os.path.isdir(dst):
-                  shutil.copytree(src, dst)
-                  print(f"הועתק: {src} -> {dst}")
+          def make_replacer():
+              def replace(match):
+                  global total_replacements
+                  name, rel_path = match.group(1), match.group(2)
+                  if "node_modules" not in rel_path:
+                      return match.group(0)  # כבר עצמאי (למשל capacitor-cordova-android-plugins) - לא נוגעים
+                  src = os.path.normpath(os.path.join("android", rel_path))
+                  dst = os.path.join(vendor_root, name)
+                  if os.path.isdir(src) and not os.path.isdir(dst):
+                      shutil.copytree(src, dst)
+                      print(f"הועתק: {src} -> {dst}")
+                  elif not os.path.isdir(src):
+                      print(f"אזהרה: {src} לא נמצא, לא ניתן לבצע vendoring ל-{name}")
+                  total_replacements += 1
+                  return f"project(':{name}').projectDir = new File('capacitor-libs/{name}')"
+              return replace
+
+          for path in candidate_files:
+              if not os.path.exists(path):
+                  print(f"{path} לא קיים בפרויקט הזה - מדלגים")
+                  continue
+              with open(path, encoding="utf-8") as f:
+                  content = f.read()
+              new_content = pattern.sub(make_replacer(), content)
+              if new_content != content:
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(new_content)
+                  print(f"--- {path} עודכן ---")
+                  print(new_content)
               else:
-                  print(f"אזהרה: {src} לא נמצא, לא ניתן לבצע vendoring ל-{name}")
-              return f"project(':{name}').projectDir = new File('capacitor-libs/{name}')"
+                  print(f"{path} - לא נמצאו הפניות node_modules לטפל בהן")
 
-          new_content = pattern.sub(replace, content)
-          with open(settings_path, "w", encoding="utf-8") as f:
-              f.write(new_content)
-          print("--- settings.gradle אחרי vendoring ---")
-          print(new_content)
+          if total_replacements == 0:
+              print("⚠️ אזהרה: אף הפניה לא טופלה בשום קובץ - ייתכן ש-cap sync שינה מבנה, "
+                    "בדקו ידנית את settings.gradle ו-capacitor.settings.gradle")
           PYEOF
 
       - name: ניקוי תיקיות build/cache כבדות מהפרויקט
