@@ -265,7 +265,9 @@ function scheduleTenderRender(snapshot) {
   }, 120);
 }
 
-async function runTenderAt(lat, lon) {
+async function runTenderAt(lat, lon, allowedGenerations) {
+  lastTenderPoint = { lat, lon };
+
   if (tenderMarker) map.removeLayer(tenderMarker);
   tenderMarker = L.marker([lat, lon], {
     icon: L.divIcon({
@@ -282,12 +284,42 @@ async function runTenderAt(lat, lon) {
     return;
   }
 
+  renderTenderFilterBar(lat, lon, allowedGenerations);
   document.getElementById('infoSheetContent').innerHTML = '<div class="tender-empty">⏳ מוצא אנטנות בטווח...</div>';
   document.getElementById('infoSheet').classList.remove('hidden');
 
-  await OperatorTender.runTender(lat, lon, allAntennas, coverageRadiusFor, scheduleTenderRender);
+  const candidateAntennas = allowedGenerations
+    ? allAntennas.filter(a => allowedGenerations.has(a.props.generation))
+    : allAntennas;
+
+  await OperatorTender.runTender(lat, lon, candidateAntennas, coverageRadiusFor, scheduleTenderRender);
   // ה-await מסתיים אחרי שכל השלבים הושלמו, אבל תוצאות הביניים כבר
   // הוצגו בדרך דרך scheduleTenderRender - אין צורך ברינדור נוסף כאן
+}
+
+const TENDER_ALL_GENERATIONS = ['5G', '4G', '3G', '2G', 'אחר', 'לא ידוע'];
+let lastTenderPoint = null;
+
+function renderTenderFilterBar(lat, lon, currentlySelected) {
+  const bar = document.getElementById('tenderFilterBar');
+  const selected = currentlySelected || new Set(TENDER_ALL_GENERATIONS);
+  bar.innerHTML = `
+    <div class="tender-filter-title">🎯 סנן לפי דור רשת ולהרצה ממוקדת:</div>
+    <div class="tender-filter-chips">
+      ${TENDER_ALL_GENERATIONS.map(g => `
+        <label class="tender-filter-chip">
+          <input type="checkbox" value="${g}" ${selected.has(g) ? 'checked' : ''}>${g}
+        </label>
+      `).join('')}
+    </div>
+    <button id="tenderRerunBtn" class="secondary-btn tender-rerun-btn">🔄 הרץ מכרז ממוקד עם הסינון שנבחר</button>
+  `;
+  bar.classList.remove('hidden');
+  bar.querySelector('#tenderRerunBtn').addEventListener('click', () => {
+    const chosen = new Set([...bar.querySelectorAll('input:checked')].map(i => i.value));
+    if (!chosen.size) { alert('צריך לבחור לפחות דור רשת אחד'); return; }
+    runTenderAt(lat, lon, chosen);
+  });
 }
 
 function openReportForm(latlng) {
@@ -769,6 +801,8 @@ function wireSearch() {
 function wireMisc() {
   document.getElementById('fitIsraelBtn').addEventListener('click', () => map.fitBounds(ISRAEL_BOUNDS));
   document.getElementById('locateBtn').addEventListener('click', async () => {
+    console.info('[antenna-map] locate: Capacitor זמין?', !!window.Capacitor,
+      '| פלאגין Geolocation זמין?', !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation));
     const onSuccess = (lat, lon) => {
       map.setView([lat, lon], 15);
       L.circleMarker([lat, lon], { radius: 7, color: '#38bdf8', fillColor: '#38bdf8', fillOpacity: 0.8 }).addTo(map);
@@ -791,13 +825,26 @@ function wireMisc() {
     // ל-navigator.geolocation הרגיל (מספיק טוב בדפדפן/PWA).
     try {
       if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation) {
-        const pos = await window.Capacitor.Plugins.Geolocation.getCurrentPosition({
-          enableHighAccuracy: true, timeout: 15000,
-        });
+        const Geo = window.Capacitor.Plugins.Geolocation;
+        // מבקשים הרשאה במפורש - לא מסתמכים על כך ש-getCurrentPosition
+        // בהכרח יבקש אותה לבד בצורה אמינה בכל גרסת אנדרואיד
+        try {
+          if (Geo.checkPermissions) {
+            const status = await Geo.checkPermissions();
+            if (status.location !== 'granted' && status.coarseLocation !== 'granted' && Geo.requestPermissions) {
+              const req = await Geo.requestPermissions();
+              console.info('[antenna-map] תוצאת בקשת הרשאת מיקום:', req);
+            }
+          }
+        } catch (permErr) {
+          console.warn('[antenna-map] שגיאה בבדיקת/בקשת הרשאת מיקום (ממשיכים לנסות בכל זאת)', permErr);
+        }
+        const pos = await Geo.getCurrentPosition({ enableHighAccuracy: true, timeout: 15000 });
         onSuccess(pos.coords.latitude, pos.coords.longitude);
         return;
       }
     } catch (err) {
+      console.error('[antenna-map] שגיאת Geolocation דרך פלאגין Capacitor:', err);
       onError(err);
       return;
     }
