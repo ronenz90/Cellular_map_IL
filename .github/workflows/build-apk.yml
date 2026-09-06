@@ -70,6 +70,47 @@ jobs:
           name: antenna-map-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
 
+      - name: הפיכת פרויקט Android Studio לעצמאי (vendoring תלויות Capacitor)
+        # settings.gradle שנוצר ע"י cap sync כולל הפניות יחסיות כמו
+        # ../node_modules/@capacitor/android/android - זה עובד בתוך
+        # ה-CI (איפה ש-node_modules קיים כאח של android/), אבל כשמוציאים
+        # רק את תיקיית android/ כארטיפקט עצמאי, ההפניות האלה נשברות
+        # (Gradle: "Could not resolve project :capacitor-android").
+        # הפתרון: מעתיקים את המודולים האלה פיזית לתוך android/ עצמו
+        # (capacitor-libs/) ומשכתבים את settings.gradle להצביע לשם -
+        # כך שהפרויקט המיוצא באמת עצמאי, בלי תלות ב-node_modules חיצוני.
+        run: |
+          python3 - <<'PYEOF'
+          import re, shutil, os
+
+          settings_path = "android/settings.gradle"
+          with open(settings_path, encoding="utf-8") as f:
+              content = f.read()
+
+          pattern = re.compile(r"project\(':([\w-]+)'\)\.projectDir\s*=\s*new File\('([^']+)'\)")
+          vendor_root = "android/capacitor-libs"
+          os.makedirs(vendor_root, exist_ok=True)
+
+          def replace(match):
+              name, rel_path = match.group(1), match.group(2)
+              if "node_modules" not in rel_path:
+                  return match.group(0)  # כבר עצמאי (למשל capacitor-cordova-android-plugins) - לא נוגעים
+              src = os.path.normpath(os.path.join("android", rel_path))
+              dst = os.path.join(vendor_root, name)
+              if os.path.isdir(src) and not os.path.isdir(dst):
+                  shutil.copytree(src, dst)
+                  print(f"הועתק: {src} -> {dst}")
+              else:
+                  print(f"אזהרה: {src} לא נמצא, לא ניתן לבצע vendoring ל-{name}")
+              return f"project(':{name}').projectDir = new File('capacitor-libs/{name}')"
+
+          new_content = pattern.sub(replace, content)
+          with open(settings_path, "w", encoding="utf-8") as f:
+              f.write(new_content)
+          print("--- settings.gradle אחרי vendoring ---")
+          print(new_content)
+          PYEOF
+
       - name: ניקוי תיקיות build/cache כבדות מהפרויקט
         # מאפשר לפתוח את הפרויקט ישירות ב-Android Studio (או בכלים
         # חיצוניים לבניית APK) ולבנות/לחתום APK משלכם, בלי תלות ב-CI.
