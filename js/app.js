@@ -164,14 +164,15 @@ function initMap() {
     coverageRefreshTimer = setTimeout(renderCoverageInViewport, 150);
   });
 
-  // לחיצה על המפה במצב "דיווח" -> פתיחת טופס דיווח נקודת קליטה חלשה
+  // לחיצה על המפה במצב "סיכה" -> נועצים/מזיזים את הסיכה החופשית לשם
+  // (לא מריצים מכרז אוטומטית - זו פעולה נפרדת מתוך הפופ-אפ של הסיכה)
   map.on('click', (e) => {
     if (reportMode) { openReportForm(e.latlng); return; }
-    if (tenderMode) { runTenderAt(e.latlng.lat, e.latlng.lng); setTenderMode(false); return; }
+    if (tenderMode) { placeTenderPin(e.latlng.lat, e.latlng.lng); return; }
   });
 }
 
-/* ================= מכרז ספקים ================= */
+/* ================= מכרז ספקים + סיכה חופשית ================= */
 
 let tenderMode = false;
 let tenderMarker = null;
@@ -181,8 +182,78 @@ function setTenderMode(on) {
   if (on && reportMode) setReportMode(false);
   const btn = document.getElementById('tenderModeBtn');
   btn.classList.toggle('active', on);
-  btn.textContent = on ? '❌ בטל (לחץ על המפה)' : '📍 בחר נקודה על המפה';
+  btn.textContent = on ? '❌ בטל מצב סיכה' : '📍 נעץ/הזז סיכה על המפה';
   document.getElementById('map').style.cursor = on ? 'crosshair' : '';
+}
+
+function buildPinPopupContent(latlng) {
+  return `
+    <div class="popup-title">📍 נקודה נבחרת</div>
+    <div class="popup-row" style="color:#6b7280;margin-bottom:8px">${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}</div>
+    <div class="popup-row" style="color:#9ca3af;font-size:11px;margin-bottom:8px">גררו את הסיכה לכל מקום על המפה כדי לכוון בדיוק</div>
+    <button class="adv-coverage-btn tender-pin-run-btn">🏆 הרץ מכרז ספקים כאן</button>
+    <button class="secondary-btn tender-pin-save-btn" style="margin-top:6px">⭐ שמור ככתובת שמורה</button>
+    <button class="tender-pin-remove-btn" style="margin-top:6px;width:100%;background:transparent;border:1px solid #f87171;color:#f87171;border-radius:8px;padding:6px;cursor:pointer;font-size:11.5px">🗑️ הסר סיכה</button>
+  `;
+}
+
+/** יוצר את הסיכה הנגררת אם היא עוד לא קיימת, או פשוט מזיז אותה למיקום נתון */
+function ensureTenderMarker(lat, lon) {
+  const latlng = L.latLng(lat, lon);
+
+  if (!tenderMarker) {
+    tenderMarker = L.marker(latlng, {
+      draggable: true,
+      icon: L.divIcon({
+        className: '',
+        html: `<div style="font-size:30px;line-height:1;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))">📍</div>`,
+        iconSize: [30, 30],
+        iconAnchor: [15, 30],
+      }),
+    }).addTo(map);
+
+    // הפופ-אפ נבנה מחדש בכל פתיחה מתוך המיקום *הנוכחי* של הסיכה (לא
+    // מיקום שנתפס ב-closure) - כך שאחרי גרירה הכפתורים תמיד פועלים
+    // על המיקום העדכני ביותר, לא הישן
+    tenderMarker.on('popupopen', () => {
+      const popupEl = tenderMarker.getPopup()._contentNode;
+      popupEl.querySelector('.tender-pin-run-btn').addEventListener('click', () => {
+        const p = tenderMarker.getLatLng();
+        runTenderAt(p.lat, p.lng);
+      });
+      popupEl.querySelector('.tender-pin-save-btn').addEventListener('click', () => {
+        const p = tenderMarker.getLatLng();
+        const label = prompt('שם לכתובת השמורה:', 'המיקום שסומן');
+        if (label === null) return;
+        SavedAddresses.add({ label: label || 'מיקום שמור', lat: p.lat, lon: p.lng, radius: 500 });
+        SavedAddresses.requestPermission();
+        renderSavedAddresses();
+        map.closePopup();
+      });
+      popupEl.querySelector('.tender-pin-remove-btn').addEventListener('click', () => {
+        map.removeLayer(tenderMarker);
+        tenderMarker = null;
+      });
+    });
+
+    // אחרי גרירה - מרעננים את תוכן הפופ-אפ (הקואורדינטות המוצגות) ופותחים
+    // אותו מחדש כדי לתת משוב מיידי על המיקום החדש
+    tenderMarker.on('dragend', () => {
+      tenderMarker.setPopupContent(buildPinPopupContent(tenderMarker.getLatLng()));
+      tenderMarker.openPopup();
+    });
+  } else {
+    tenderMarker.setLatLng(latlng);
+  }
+
+  tenderMarker.bindPopup(buildPinPopupContent(latlng));
+  return tenderMarker;
+}
+
+/** נועצים סיכה חופשית ופותחים את הפופ-אפ שלה (בלי להריץ מכרז אוטומטית) */
+function placeTenderPin(lat, lon) {
+  const marker = ensureTenderMarker(lat, lon);
+  marker.openPopup();
 }
 
 function tenderGenBadges(entry) {
@@ -267,16 +338,7 @@ function scheduleTenderRender(snapshot) {
 
 async function runTenderAt(lat, lon, allowedGenerations) {
   lastTenderPoint = { lat, lon };
-
-  if (tenderMarker) map.removeLayer(tenderMarker);
-  tenderMarker = L.marker([lat, lon], {
-    icon: L.divIcon({
-      className: '',
-      html: `<div style="font-size:26px;line-height:1">📍</div>`,
-      iconSize: [26, 26],
-      iconAnchor: [13, 26],
-    }),
-  }).addTo(map);
+  ensureTenderMarker(lat, lon); // מבטיח שהסיכה החופשית קיימת/מוזזת לכאן, בלי לפתוח את הפופ-אפ הקטנה שלה (יש לנו את פאנל התוצאות המלא בהמשך)
 
   if (!allAntennas.length) {
     document.getElementById('infoSheetContent').innerHTML = '<div class="tender-empty">הנתונים עדיין נטענים, נסה שוב עוד רגע</div>';
@@ -703,6 +765,14 @@ function wireReportsAndSaved() {
 
 function wireTender() {
   document.getElementById('tenderModeBtn').addEventListener('click', () => setTenderMode(!tenderMode));
+  document.getElementById('tenderRunPinBtn').addEventListener('click', () => {
+    if (!tenderMarker) {
+      alert('אין עדיין סיכה על המפה - נעץ סיכה קודם (לחצו "נעץ/הזז סיכה" ואז על המפה)');
+      return;
+    }
+    const p = tenderMarker.getLatLng();
+    runTenderAt(p.lat, p.lng);
+  });
   document.getElementById('infoSheetClose').addEventListener('click', () => {
     document.getElementById('infoSheet').classList.add('hidden');
   });
