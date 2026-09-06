@@ -34,6 +34,32 @@ jobs:
           fi
           npx cap sync android
 
+      - name: ודא שהרשאות מיקום קיימות ב-Manifest (רשת ביטחון)
+        # לא סומכים רק על המיזוג האוטומטי של @capacitor/geolocation -
+        # מוודאים במפורש שההרשאות קיימות, ומדפיסים ללוג לאימות.
+        run: |
+          python3 - <<'PYEOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, encoding="utf-8") as f:
+              content = f.read()
+          perms = [
+              '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+              '<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />',
+          ]
+          for perm in perms:
+              name = perm.split('"')[1]
+              if name not in content:
+                  content = re.sub(r'(<manifest[^>]*>)', r'\1\n    ' + perm, content, count=1)
+                  print(f"נוספה הרשאה: {name}")
+              else:
+                  print(f"הרשאה כבר קיימת: {name}")
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          PYEOF
+          echo "--- תוכן ההרשאות הסופי ב-Manifest ---"
+          grep -i "uses-permission" android/app/src/main/AndroidManifest.xml
+
       - name: בניית APK (debug)
         working-directory: android
         run: ./gradlew assembleDebug
@@ -43,3 +69,18 @@ jobs:
         with:
           name: antenna-map-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: הכנת zip של פרויקט Android Studio העצמאי
+        # מאפשר לפתוח את הפרויקט ישירות ב-Android Studio ולבנות/לחתום
+        # APK משלכם, בלי תלות ב-CI. מנקים תיקיות build/cache כבדות
+        # שנוצרות מחדש אוטומטית בפתיחה הראשונה ב-Android Studio.
+        run: |
+          rm -rf android/app/build android/.gradle android/build android/.idea
+          rm -f android/local.properties  # נתיב SDK ספציפי ל-runner, Android Studio ייצור מחדש
+          zip -r android-studio-project.zip android -x "android/.git/*"
+
+      - name: העלאת פרויקט Android Studio כ-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-studio-project
+          path: android-studio-project.zip
