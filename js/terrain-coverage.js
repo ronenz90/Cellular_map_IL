@@ -83,7 +83,9 @@ const TerrainCoverage = (() => {
   function buildPolygonFromRays(antenna, rays, baseRadius) {
     const polygon = [];
     for (const ray of rays) {
-      let edgeDist = ray.blocked ? ray.losDistance : Math.min(baseRadius, PRECOMPUTE_MAX_DIST);
+      // תמיד מוגבל ל-baseRadius - קו-ראייה פנוי לא "ממציא" טווח שידור
+      // נוסף מעבר להספק/דור-הרשת של האנטנה (ראו הערה מפורטת ב-rayEdgeDistance)
+      let edgeDist = ray.blocked ? Math.min(ray.losDistance, baseRadius) : baseRadius;
       edgeDist = edgeDist * (CLUTTER_FACTOR[ray.clutterCategory] || 1.0);
       const [lat, lon] = destinationPoint(antenna.lat, antenna.lon, ray.bearing, edgeDist);
       polygon.push([lat, lon]);
@@ -99,7 +101,12 @@ const TerrainCoverage = (() => {
   }
 
   function rayEdgeDistance(ray, baseRadius) {
-    const raw = ray.blocked ? ray.losDistance : Math.min(baseRadius, PRECOMPUTE_MAX_DIST);
+    // תמיד מוגבל ל-baseRadius: קו-ראייה פנוי מרחוק (למשל מעל הים/שטח
+    // פתוח) לא אומר שהאנטנה משדרת רחוק יותר מהרדיוס הריאלי שלה לפי
+    // הספק/דור-רשת - הוא יכול רק *לקצר* את הכיסוי (הר/גבעה קרובה
+    // חוסמת), לעולם לא להאריך אותו. זה היה הבאג שגרם ל"כוכב" ענק
+    // שיוצא רחוק מאוד בכיוונים ללא חסימה קרובה.
+    const raw = ray.blocked ? Math.min(ray.losDistance, baseRadius) : baseRadius;
     return raw * (CLUTTER_FACTOR[ray.clutterCategory] || 1.0);
   }
 
@@ -351,7 +358,17 @@ const TerrainCoverage = (() => {
           break;
         }
       }
-      if (!blocked) edgeDist = Math.min(baseRadius, maxDist); // ללא חסימה - נשארים ברדיוס הבסיסי (לא "ממציאים" טווח נוסף)
+      // תמיד מגבילים ל-baseRadius (הרדיוס לפי דור-רשת+צפיפות+הספק) -
+      // גם אם התבליט נשאר פנוי לק"מים (למשל מעל הים/שטח פתוח), האנטנה
+      // עדיין לא באמת משדרת רחוק יותר מההספק שלה. זה מה שגרם ל"כוכב"
+      // ענק שיוצא רחוק מאוד בכיוונים ללא חסימה - התיקון: קו-הראייה יכול
+      // רק *לקצר* את הכיסוי (אם יש הר/גבעה קרובה), לעולם לא להאריך אותו
+      // מעבר לרדיוס הבסיסי.
+      if (!blocked) {
+        edgeDist = baseRadius;
+      } else {
+        edgeDist = Math.min(edgeDist, baseRadius);
+      }
 
       // התאמת תכסית: בודקים את קטגוריית הקרקע בנקודת האמצע של הקרן עד
       // כה (proxy סביר לסוג הסביבה הדומיננטי בכיוון הזה) ומכווצים/
