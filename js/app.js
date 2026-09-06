@@ -168,7 +168,11 @@ function initMap() {
   // (לא מריצים מכרז אוטומטית - זו פעולה נפרדת מתוך הפופ-אפ של הסיכה)
   map.on('click', (e) => {
     if (reportMode) { openReportForm(e.latlng); return; }
-    if (tenderMode) { placeTenderPin(e.latlng.lat, e.latlng.lng); return; }
+    // לחיצה רגילה על שטח ריק במפה תמיד נועצת/מזיזה את הסיכה החופשית -
+    // בלי צורך "להפעיל מצב" קודם (בדיוק כמו Google Maps). "מצב סיכה"
+    // עדיין קיים כאופציה נפרדת רק בשביל המקרה שרוצים לנעוץ בדיוק מעל
+    // אנטנה/אשכול קיימים (שאחרת יפתחו את הפופ-אפ שלהם, ראו למטה).
+    placeTenderPin(e.latlng.lat, e.latlng.lng);
   });
 
   // אם המשתמש לוחץ ישירות על אנטנה/אשכול בזמן מצב-סיכה - גם זה אמור
@@ -193,7 +197,7 @@ function setTenderMode(on) {
   if (on) closeSidePanel(); // אחרת בנייד הפאנל/ה-overlay חוסמים את הקליק על המפה
   const btn = document.getElementById('tenderModeBtn');
   btn.classList.toggle('active', on);
-  btn.textContent = on ? '❌ בטל מצב סיכה' : '📍 נעץ/הזז סיכה על המפה';
+  btn.textContent = on ? '❌ בטל (עכשיו קליק על אנטנה ינעץ סיכה שם)' : '🎯 נעץ סיכה גם מעל אנטנות (לא רק בשטח פנוי)';
   document.getElementById('map').style.cursor = on ? 'crosshair' : '';
 }
 
@@ -788,7 +792,7 @@ function wireTender() {
   document.getElementById('tenderModeBtn').addEventListener('click', () => setTenderMode(!tenderMode));
   document.getElementById('tenderRunPinBtn').addEventListener('click', () => {
     if (!tenderMarker) {
-      showTransientBanner('אין עדיין סיכה על המפה - נעץ סיכה קודם (לחצו "נעץ/הזז סיכה" ואז על המפה)', true, 6000);
+      showTransientBanner('אין עדיין סיכה על המפה - פשוט הקישו על כל מקום במפה כדי לנעוץ אחת', true, 6000);
       return;
     }
     const p = tenderMarker.getLatLng();
