@@ -1,8 +1,8 @@
 {
-  "offset": 323,
-  "cycles_completed": 5,
-  "last_run": "2026-09-09T10:44:30.578293+00:00",
-  "processed_last_run": 6593,
+  "offset": 6716,
+  "cycles_completed": 6,
+  "last_run": "2026-09-10T10:38:59.134499+00:00",
+  "processed_last_run": 6393,
   "total_antennas": 8475,
-  "total_processed_ever": 44952
+  "total_processed_ever": 51345
 }
