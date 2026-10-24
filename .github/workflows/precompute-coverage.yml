@@ -4,16 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       max_hours:
-        description: 'תקציב זמן ריצה בשעות (ברירת מחדל 5)'
+        description: 'תקציב זמן ריצה בשעות (ברירת מחדל 2, ידני בלבד - אפשר לדרוס)'
         required: false
-        default: '5'
+        default: '2'
+      force:
+        description: 'להריץ גם אם המחזור האחרון עדיין "טרי" (כן/לא)'
+        required: false
+        default: 'false'
   schedule:
-    # כל לילה ב-01:00 UTC (כ-04:00 שעון ישראל) - אחרי שעדכון האנטנות
-    # היומי (03:00 UTC) כבר... רגע, זה *לפני*. זה בכוונה: מריצים את
-    # precompute על הנתונים העדכניים ביותר שכבר קיימים בריפו (מהלילה
-    # הקודם), וב-03:00 UTC יעודכנו האנטנות לקראת הסבב הבא. איטי בכוונה -
-    # תבליט/תכסית כמעט ולא משתנים, אין דחיפות לרוץ מיד אחרי כל עדכון.
-    - cron: '0 1 * * *'
+    # פעם בכל 3 ימים, 01:00 UTC (כ-04:00 שעון ישראל). תבליט/תכסית כמעט
+    # ולא משתנים, אז אין צורך לרוץ כל לילה - זה היה הגורם המרכזי לצריכת
+    # Actions minutes גבוהה (עד 5 שעות * 30 לילות = עד 150 שעות/חודש).
+    # בנוסף יש בדיקת "טריות" בתוך הסקריפט שמדלגת על ריצה שלמה אם מחזור
+    # מלא כבר הושלם לאחרונה - כך שבפועל ירוץ בפועל לעומק רק כשצריך.
+    - cron: '0 1 */3 * *'
 
 permissions:
   contents: write
@@ -25,7 +29,7 @@ concurrency:
 jobs:
   precompute:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # מרווח ביטחון מתחת למגבלת 360 הדקות של GitHub Actions
+    timeout-minutes: 140  # מרווח ביטחון מעל לתקציב הפנימי של 2 שעות
     steps:
       - uses: actions/checkout@v4
 
@@ -35,10 +39,9 @@ jobs:
 
       - name: הרצת חישוב מקדים (איטי, מכבד rate limits)
         env:
-          MAX_HOURS: ${{ github.event.inputs.max_hours || '5' }}
-        run: |
-          export MAX_RUNTIME_SECONDS=$(python3 -c "print(int(float('$MAX_HOURS') * 3600))")
-          python3 scripts/precompute_coverage.py
+          MAX_RUNTIME_SECONDS: ${{ github.event.inputs.max_hours && fromJSON(github.event.inputs.max_hours) * 3600 || 7200 }}
+          FORCE_RUN: ${{ github.event.inputs.force || 'false' }}
+        run: python3 scripts/precompute_coverage.py
 
       - name: קומיט ופוש של תוצאות הלילה
         run: |
@@ -47,24 +50,8 @@ jobs:
           git add data/coverage/ data/coverage-precompute-state.json
           if git diff --cached --quiet; then
             echo "אין קבצי כיסוי חדשים"
-            exit 0
+          else
+            COUNT=$(git diff --cached --name-only | grep -c '^data/coverage/' || true)
+            git commit -m "חישוב מקדים לילי לכיסוי: כ-$COUNT קבצים עודכנו"
+            git push
           fi
-          COUNT=$(git diff --cached --name-only | grep -c '^data/coverage/' || true)
-          git commit -m "חישוב מקדים לילי לכיסוי: כ-$COUNT קבצים עודכנו"
-
-          # הריצה הזו לוקחת עד כמה שעות - אם בינתיים נדחף commit אחר
-          # ל-main (למשל עדכון האנטנות היומי), ה-push הרגיל יידחה כי
-          # זה כבר לא fast-forward. במקום לאבד את כל העבודה, מושכים
-          # (rebase) את השינויים המרוחקים ומנסים שוב, עד 5 פעמים.
-          for attempt in 1 2 3 4 5; do
-            if git push; then
-              echo "✓ נדחף בהצלחה (ניסיון $attempt)"
-              exit 0
-            fi
-            echo "⚠️ push נדחה (ניסיון $attempt) - כנראה יש commit חדש יותר ב-main. מושכים עם rebase ומנסים שוב..."
-            git fetch origin main
-            git rebase origin/main
-          done
-
-          echo "❌ נכשל לדחוף אחרי 5 ניסיונות"
-          exit 1
