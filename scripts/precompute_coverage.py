@@ -15,7 +15,10 @@ precompute_coverage.py
 
 הרצה: python3 scripts/precompute_coverage.py
 משתני סביבה אופציונליים:
-  MAX_RUNTIME_SECONDS - תקציב זמן ריצה בשניות (ברירת מחדל: 5 שעות)
+  MAX_RUNTIME_SECONDS - תקציב זמן ריצה בשניות (ברירת מחדל: 2 שעות)
+  FRESHNESS_DAYS - אם מחזור מלא הושלם לפני פחות מכך ימים, מדלגים על
+                   הריצה כולה בתחילת מחזור חדש (ברירת מחדל: 5)
+  FORCE_RUN - 'true' כדי להריץ בכל מקרה, גם אם הנתונים טריים
 """
 
 import json
@@ -33,7 +36,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 COVERAGE_DIR = DATA_DIR / "coverage"
 STATE_PATH = DATA_DIR / "coverage-precompute-state.json"
-LANDCOVER_PATH = DATA_DIR / "landcover-israel.json"
 
 # --- פרמטרים (תואמים בדיוק ל-js/terrain-coverage.js, כדי שהתוצאות יהיו זהות) ---
 RAYS = 16
@@ -44,25 +46,19 @@ ANTENNA_HEIGHT = 30
 RECEIVER_HEIGHT = 1.5
 K_FACTOR = 4 / 3
 
-LANDCOVER_CELL_DEG = 0.05  # ~5 ק"מ, גודל תא לאינדקס המרחבי של התכסית
-
+CLUTTER_QUERY_DELAY = 1.5   # שניות בין קריאות ל-Overpass (fair use)
 ELEVATION_BATCH_DELAY = 1.1  # שניות בין batches ל-opentopodata
 
-# --- Overpass: משמש רק כ-fallback חד-פעמי אם data/landcover-israel.json
-# עוד לא קיים (למשל לפני ההרצה הראשונה של update-landcover.yml). בפועל
-# התגלה לא אמין בנפח הנדרש (429/504 חוזרים על אלפי אנטנות) - הפתרון
-# העיקרי עכשיו הוא קובץ תכסית מקומי שמעובד מראש (ראו fetch_landcover.py).
-CLUTTER_QUERY_DELAY = 2.5
-OVERPASS_ENDPOINTS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-]
-
-MAX_RUNTIME_SECONDS = int(os.environ.get("MAX_RUNTIME_SECONDS", 5 * 3600))
+MAX_RUNTIME_SECONDS = int(os.environ.get("MAX_RUNTIME_SECONDS", 2 * 3600))
 SAFETY_MARGIN_SECONDS = 180  # משאירים 3 דקות מרווח ביטחון לפני סוף התקציב
 SAVE_EVERY = 20  # שומרים state כל כמה אנטנות (למקרה של קריסה/timeout)
+
+# אם מחזור מלא (כל האנטנות) הושלם לאחרונה יותר מ-FRESHNESS_DAYS, אין טעם
+# להתחיל מחזור חדש - תבליט ותכסית כמעט לא משתנים. דילוג כזה חוסך ריצת
+# Actions שלמה (ואת העלות שלה) כל פעם שהנתונים כבר "טריים". אנטנות
+# חדשות שנוספו בינתיים עדיין מקבלות כיסוי "live" מהממשק עד למחזור הבא.
+FRESHNESS_DAYS = float(os.environ.get("FRESHNESS_DAYS", 5))
+FORCE_RUN = os.environ.get("FORCE_RUN", "false").strip().lower() in ("1", "true", "yes", "כן")
 
 _started_at = time.time()
 
@@ -118,7 +114,7 @@ def fetch_elevations_batch(points):
 
 
 def fetch_clutter_polygons(lat, lon, radius_m):
-    query = f"""[out:json][timeout:25];(
+    query = f"""[out:json][timeout:20];(
       way["natural"="wood"](around:{radius_m},{lat},{lon});
       way["landuse"="forest"](around:{radius_m},{lat},{lon});
       way["natural"="water"](around:{radius_m},{lat},{lon});
@@ -127,9 +123,15 @@ def fetch_clutter_polygons(lat, lon, radius_m):
       way["landuse"="commercial"](around:{radius_m},{lat},{lon});
       way["landuse"="industrial"](around:{radius_m},{lat},{lon});
     );out geom;"""
-
-    def parse(data):
-        polys = []
+    polys = []
+    try:
+        req = Request(
+            "https://overpass-api.de/api/interpreter",
+            data=("data=" + query).encode("utf-8"),
+            headers={"User-Agent": "antenna-map-precompute/1.0"},
+        )
+        with urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
         for el in data.get("elements", []):
             geom = el.get("geometry")
             if not geom or len(geom) < 3:
@@ -144,32 +146,11 @@ def fetch_clutter_polygons(lat, lon, radius_m):
             else:
                 cat = "open"
             polys.append({"category": cat, "points": [[g["lat"], g["lon"]] for g in geom]})
-        return polys
-
-    # מנסים כל שרת, עם עד 2 ניסיונות לכל שרת (backoff ארוך יותר על 429)
-    for endpoint in OVERPASS_ENDPOINTS:
-        for attempt in range(2):
-            try:
-                req = Request(
-                    endpoint,
-                    data=("data=" + query).encode("utf-8"),
-                    headers={"User-Agent": "antenna-map-precompute/1.0"},
-                )
-                with urlopen(req, timeout=35) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                time.sleep(CLUTTER_QUERY_DELAY)
-                return parse(data)
-            except HTTPError as e:
-                wait = 10 if e.code == 429 else 5
-                print(f"    Overpass ({endpoint.split('/')[2]}) HTTP {e.code}, ממתין {wait}s", file=sys.stderr)
-                time.sleep(wait)
-            except Exception as e:
-                print(f"    Overpass ({endpoint.split('/')[2]}) שגיאה: {e}", file=sys.stderr)
-                time.sleep(3)
-
-    print("    כל שרתי Overpass נכשלו הפעם - ממשיכים בלי תכסית לאנטנה הזו (רק תבליט)", file=sys.stderr)
-    time.sleep(CLUTTER_QUERY_DELAY)
-    return []
+    except Exception as e:
+        print(f"    שגיאת Overpass: {e}", file=sys.stderr)
+    finally:
+        time.sleep(CLUTTER_QUERY_DELAY)
+    return polys
 
 
 def point_in_polygon(lat, lon, polygon):
@@ -192,58 +173,10 @@ def clutter_at(lat, lon, polygons):
     return "open"
 
 
-# --- שכבת "תכסית מקומית" (data/landcover-israel.json, נבנה ע"י
-# scripts/fetch_landcover.py) - זו הדרך המועדפת עכשיו, במקום קריאות
-# Overpass חיות שהתגלו לא אמינות בנפח הנדרש. ---
-
-def load_landcover_bundle():
-    if not LANDCOVER_PATH.exists():
-        return None
-    try:
-        return json.loads(LANDCOVER_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-
-
-def build_landcover_index(bundle):
-    """אינדקס grid מרחבי: לכל תא, רשימת הפוליגונים שחופפים אליו (לפי
-    bounding box). מאפשר לשלוף רק פוליגונים רלוונטיים לכל אנטנה במקום
-    לבדוק את כל אלפי הפוליגונים בארץ עבור כל נקודה."""
-    grid = {}
-    for poly in bundle:
-        lats = [p[0] for p in poly["points"]]
-        lons = [p[1] for p in poly["points"]]
-        min_cy, max_cy = int(min(lats) / LANDCOVER_CELL_DEG), int(max(lats) / LANDCOVER_CELL_DEG)
-        min_cx, max_cx = int(min(lons) / LANDCOVER_CELL_DEG), int(max(lons) / LANDCOVER_CELL_DEG)
-        for cy in range(min_cy, max_cy + 1):
-            for cx in range(min_cx, max_cx + 1):
-                grid.setdefault((cy, cx), []).append(poly)
-    return grid
-
-
-def clutter_polygons_from_index(lat, lon, index):
-    cy, cx = int(lat / LANDCOVER_CELL_DEG), int(lon / LANDCOVER_CELL_DEG)
-    seen_ids = set()
-    result = []
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            for poly in index.get((cy + dy, cx + dx), []):
-                pid = id(poly)
-                if pid in seen_ids:
-                    continue
-                seen_ids.add(pid)
-                result.append(poly)
-    return result
-
-
-def process_antenna(lat, lon, landcover_index):
+def process_antenna(lat, lon):
     """מחשב עבור אנטנה אחת: לכל אחת מ-RAYS כיוונים, מרחק חסימת קו-ראייה
     (מבוסס תבליט) וקטגוריית תכסית. פורמט התוצאה תואם בדיוק את מה ש-
-    js/terrain-coverage.js מצפה לו (ראו usePrecomputed בקובץ ה-JS).
-
-    landcover_index=None -> אין קובץ תכסית מקומי עדיין (למשל לפני
-    ההרצה הראשונה של update-landcover.yml) -> נופלים חזרה ל-Overpass
-    חי כ-fallback (איטי יותר, פחות אמין - ראו הערה למעלה)."""
+    js/terrain-coverage.js מצפה לו (ראו usePrecomputed בקובץ ה-JS)."""
     ray_points = []
     ray_start_idx = []
     for r in range(RAYS):
@@ -256,18 +189,11 @@ def process_antenna(lat, lon, landcover_index):
 
     all_points = [(lat, lon)] + [(p[0], p[1]) for p in ray_points]
 
-    if landcover_index is not None:
-        # מקומי לגמרי - מיידי, בלי שום קריאת רשת
-        elevations = fetch_elevations_batch(all_points)
-        clutter_polys = clutter_polygons_from_index(lat, lon, landcover_index)
-    else:
-        # fallback: אין עדיין קובץ תכסית מקומי - קריאה חיה ל-Overpass
-        # (במקביל לתבליט, כדי לא להכפיל את זמן ההמתנה)
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            fut_elev = ex.submit(fetch_elevations_batch, all_points)
-            fut_clutter = ex.submit(fetch_clutter_polygons, lat, lon, MAX_DIST)
-            elevations = fut_elev.result()
-            clutter_polys = fut_clutter.result()
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_elev = ex.submit(fetch_elevations_batch, all_points)
+        fut_clutter = ex.submit(fetch_clutter_polygons, lat, lon, MAX_DIST)
+        elevations = fut_elev.result()
+        clutter_polys = fut_clutter.result()
 
     antenna_ground = elevations[0] or 0
     antenna_total_h = antenna_ground + ANTENNA_HEIGHT
@@ -321,7 +247,7 @@ def load_state():
             return json.loads(STATE_PATH.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             pass
-    return {"offset": 0, "cycles_completed": 0, "total_processed_ever": 0}
+    return {"offset": 0, "cycles_completed": 0}
 
 
 def save_state(state):
@@ -346,19 +272,26 @@ def main():
         print("אין אנטנות לעבד", file=sys.stderr)
         return
 
-    landcover_bundle = load_landcover_bundle()
-    if landcover_bundle is not None:
-        print(f"✓ נטען קובץ תכסית מקומי: {len(landcover_bundle)} פוליגונים - בדיקת תכסית תהיה מקומית ומיידית", file=sys.stderr)
-        landcover_index = build_landcover_index(landcover_bundle)
-    else:
-        print("⚠️ אין עדיין data/landcover-israel.json (הריצו את update-landcover.yml פעם אחת) - "
-              "נופלים זמנית ל-Overpass חי (איטי, עשוי להיכשל בחלק מהאנטנות)", file=sys.stderr)
-        landcover_index = None
-
     COVERAGE_DIR.mkdir(parents=True, exist_ok=True)
     state = load_state()
     offset = state.get("offset", 0) % n
-    total_processed_ever = state.get("total_processed_ever", 0)
+
+    # --- בדיקת טריות: אם אנחנו בתחילת מחזור חדש (offset=0) ומחזור מלא
+    # הושלם לאחרונה (בתוך FRESHNESS_DAYS), מדלגים על הריצה כולה. ריצה
+    # באמצע מחזור (offset != 0) ממשיכה תמיד, כדי לא להשאיר נתונים חלקיים.
+    last_cycle_iso = state.get("last_full_cycle_at")
+    if offset == 0 and last_cycle_iso and not FORCE_RUN:
+        try:
+            last_cycle_dt = datetime.fromisoformat(last_cycle_iso)
+            age_days = (datetime.now(timezone.utc) - last_cycle_dt).total_seconds() / 86400
+        except ValueError:
+            age_days = None
+        if age_days is not None and age_days < FRESHNESS_DAYS:
+            print(f"מחזור מלא הושלם לפני {age_days:.1f} ימים (< {FRESHNESS_DAYS} ימי טריות) - "
+                  f"מדלגים על הריצה כדי לחסוך בעלות Actions. "
+                  f"להרצה כפויה: workflow_dispatch עם force=true.", file=sys.stderr)
+            return
+
     processed = 0
     i = offset
 
@@ -370,7 +303,7 @@ def main():
         key = antenna_key(antenna["props"], antenna["lat"], antenna["lon"])
         out_path = COVERAGE_DIR / f"{key}.json"
         try:
-            result = process_antenna(antenna["lat"], antenna["lon"], landcover_index)
+            result = process_antenna(antenna["lat"], antenna["lon"])
             out_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             print(f"  שגיאה באנטנה {key}: {e}", file=sys.stderr)
@@ -380,16 +313,12 @@ def main():
 
         if processed % SAVE_EVERY == 0:
             new_offset = i % n
-            # ספירת סבבים מבוססת על סה"כ מצטבר שעובד אי-פעם (חלוקה שלמה
-            # ב-n), לא על השוואת offset שהייתה שבורה (מתעדכנת פעם אחת
-            # בלבד לכל מעבר סיבוב, לא בכל checkpoint אחרי המעבר)
-            cycles = (total_processed_ever + processed) // n
+            cycles = state.get("cycles_completed", 0) + (1 if new_offset < offset else 0)
             state.update({
                 "offset": new_offset,
                 "last_run": datetime.now(timezone.utc).isoformat(),
                 "processed_last_run": processed,
                 "total_antennas": n,
-                "total_processed_ever": total_processed_ever + processed,
                 "cycles_completed": cycles,
             })
             save_state(state)
@@ -402,18 +331,21 @@ def main():
             break
 
     final_offset = i % n
-    cycles = (total_processed_ever + processed) // n
+    completed_cycle_now = processed >= n
+    cycles = state.get("cycles_completed", 0) + (1 if completed_cycle_now else 0)
+    now_iso = datetime.now(timezone.utc).isoformat()
     state.update({
         "offset": final_offset,
-        "last_run": datetime.now(timezone.utc).isoformat(),
+        "last_run": now_iso,
         "processed_last_run": processed,
         "total_antennas": n,
-        "total_processed_ever": total_processed_ever + processed,
         "cycles_completed": cycles,
     })
+    if completed_cycle_now:
+        state["last_full_cycle_at"] = now_iso
     save_state(state)
     print(f"סיום ריצה: עובדו {processed} אנטנות ({processed/n*100:.1f}% מסבב אחד). "
-          f"offset הבא: {final_offset}/{n}. סבבים שהושלמו (מצטבר): {cycles}", file=sys.stderr)
+          f"offset הבא: {final_offset}/{n}. סבבים שהושלמו: {cycles}", file=sys.stderr)
 
 
 if __name__ == "__main__":
